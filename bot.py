@@ -22,7 +22,6 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("LANGAME_API_KEY")
 API_BASE_URL = "https://cyberx302.langame.ru"
-ALLOWED_USERS = [int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -114,45 +113,62 @@ def format_date_ru(date_str: str) -> str:
         date_str = date_str.replace(eng, rus)
     return date_str
 
-# Список ключевых слов для определения товаров бара (исключаем служебные операции)
-EXCLUDED_KEYWORDS = [
-    "пополнение", "списание баланса", "инкассация", "автоматическая",
-    "техническое", "служебное", "корректировка", "возврат"
+# ПОЛНЫЙ СПИСОК ТОВАРОВ (на основе вашей таблицы)
+PRODUCT_NAMES = [
+    # Напитки
+    "Флеш", "Добрый", "Берн", "Хрустальная", "Эвервесс Кола", "Липтон",
+    "Импор. газировка", "Кола", "Пепси", "Спрайт", "Фанта", "Кока-кола",
+    "Адреналин", "Аква Минерале", "Рич", "Бон Аква", "Палпи", "Монстер",
+    "РедБулл", "Холодный кофе Лотте", "Чупа Чупс", "SAC SAC",
+    
+    # Еда
+    "Чиабатта", "Кацу", "Чебупели", "Чебупицца", "Ходстеры", "Кальян",
+    "Сникерс", "Баунти", "Твикс", "Орео Чоко-Пай", "КитКат", "Шарики КитКат",
+    "Мальтизерс", "М&M", "Вафли Несквик", "Принглс", "Лейс",
+    
+    # Пиво
+    "Пиво Козёл", "Пиво Хадыженское", "Пиво Старый Мельник",
+    
+    # Шоколад и сладости
+    "Милка Шоколадный Напиток", "Милка", "Сникерс", "Баунти", "Твикс",
+    
+    # Остальное
+    "Бургер", "Пицца", "Кофе", "Чай", "Сок", "Вода", "Наггетсы", "Картошка",
+    "Сэндвич", "Хот-дог", "Сосиска", "Слойка", "Круассан", "Пончик",
+    "Маффин", "Торт", "Пирожное", "Мороженое", "Гамбургер", "Чизбургер",
+    "Салат", "Фрукты"
 ]
 
-PRODUCT_KEYWORDS = [
-    "бургер", "пицца", "кофе", "чай", "сок", "вода", "кола", "пепси",
-    "спрайт", "сэндвич", "наггетс", "картошка", "фрай", "кока-кола",
-    "липтон", "фанта", "энергетик", "смузи", "капучино", "латте",
-    "американо", "молоко", "шоколад", "печенье", "чипсы", "сухарики",
-    "пиво", "вино", "коктейль", "мохито", "маргарита", "виски", "ром",
-    "джин", "текила", "ликер", "шампанское", "сидр", "квас", "лимонад",
-    "морс", "компот", "кисель", "йогурт", "кефир", "ряженка", "снежок"
+# Слова для ИСКЛЮЧЕНИЯ (НЕ товары)
+EXCLUDED_NAMES = [
+    "пополнение баланса", "списание баланса", "инкассация", 
+    "автоматическая инкассация", "техническое обслуживание", 
+    "служебная операция", "корректировка", "возврат",
+    "блокировка", "разблокировка", "технический старт", 
+    "техническая остановка", "сессия", "бонус", "скидка"
 ]
 
 def is_product(name: str) -> bool:
-    """Проверка, является ли операция товаром бара"""
+    """Проверка, является ли операция товаром"""
     if not name:
         return False
     
     name_lower = name.lower()
     
     # Исключаем служебные операции
-    for excluded in EXCLUDED_KEYWORDS:
+    for excluded in EXCLUDED_NAMES:
         if excluded in name_lower:
             return False
     
-    # Проверяем по ключевым словам
-    for keyword in PRODUCT_KEYWORDS:
-        if keyword in name_lower:
+    # Проверяем по списку товаров
+    for product in PRODUCT_NAMES:
+        if product.lower() in name_lower:
             return True
     
-    # Если название короткое и нет явных признаков товара - скорее всего не товар
-    if len(name) < 5:
-        return False
+    # Если название длинное и нет признаков служебной операции - считаем товаром
+    if len(name) > 5 and not any(x in name_lower for x in ["сессия", "блокировка", "технический"]):
+        return True
     
-    # Дополнительная проверка: если в названии есть цифры или специальные символы - возможно товар
-    # Но в целом, если название не попало под ключевые слова, лучше исключить
     return False
 
 async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
@@ -185,56 +201,64 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
     total_income = 0
     sessions_count = 0
     unique_guests = set()
-    products = defaultdict(float)  # название товара -> общая сумма
+    products = defaultdict(float)
     club_name = "CyberX Краснодар Коммунаров"
+    
+    # Для отладки - выводим примеры названий товаров
+    product_samples = []
     
     for item in operations_list:
         op_sum = safe_float(item.get("sum", 0))
-        op_type = item.get("type", "")  # "plus" или "minus"
+        op_type = item.get("type", "")
         op_name = item.get("name", "")
         club_name = item.get("club_name", club_name)
         
-        # Пополнения (выручка) - тип "plus"
+        # Пополнения (выручка)
         if op_type == "plus" and op_sum > 0:
             total_income += op_sum
-            logger.debug(f"Пополнение: {op_name} на {op_sum} ₽")
         
-        # Списания (только товары) - тип "minus"
+        # Товары (списания)
         if op_type == "minus" and op_sum > 0 and op_name:
-            # Проверяем, является ли это товаром
             if is_product(op_name):
                 clean_name = op_name.strip()
-                if len(clean_name) > 2:
-                    products[clean_name] += op_sum
-                    logger.debug(f"Товар: {clean_name} на {op_sum} ₽")
-            else:
-                logger.debug(f"Исключено (не товар): {op_name}")
+                products[clean_name] += op_sum
+                if len(product_samples) < 10:
+                    product_samples.append(clean_name)
         
-        # Подсчет сессий (по ключевым словам в названии)
+        # Сессии
         name_lower = op_name.lower()
-        if "сессия" in name_lower or "session" in name_lower or "запуск" in name_lower:
+        if any(x in name_lower for x in ["сессия", "session", "запуск", "игровая"]):
             sessions_count += 1
         
-        # Уникальные гости (по имени в операции)
+        # Уникальные гости
         if op_name and len(op_name) > 3 and op_type != "plus":
-            # Исключаем служебные названия
-            if not any(ex in op_name.lower() for ex in EXCLUDED_KEYWORDS):
+            if not any(ex in op_name.lower() for ex in EXCLUDED_NAMES):
                 unique_guests.add(op_name[:50])
     
-    # Топ товаров (по общей выручке)
+    # Логируем примеры товаров для отладки
+    if product_samples:
+        logger.info(f"Примеры названий товаров: {product_samples[:5]}")
+    else:
+        logger.warning("Товары не найдены! Проверьте названия операций.")
+        # Выводим примеры всех списаний для анализа
+        sample_minus = []
+        for item in operations_list[:20]:
+            if item.get("type") == "minus" and item.get("name"):
+                sample_minus.append(item.get("name"))
+        if sample_minus:
+            logger.info(f"Примеры списаний: {sample_minus[:10]}")
+    
     top_products = sorted(products.items(), key=lambda x: x[1], reverse=True)[:10]
     bar_revenue = sum(products.values())
     
-    # Средний чек
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
-    
-    # Количество дней
     days_count = max((date_to - date_from).days + 1, 1)
     avg_daily = total_income / days_count if days_count > 0 else 0
     
     logger.info(f"Выручка: {total_income:.0f} ₽")
     logger.info(f"Сессии: {sessions_count}")
-    logger.info(f"Товаров: {len(products)}")
+    logger.info(f"Товаров найдено: {len(products)}")
+    logger.info(f"Выручка бара: {bar_revenue:.0f} ₽")
     logger.info(f"Топ товаров: {top_products[:3]}")
     
     return {
@@ -253,7 +277,7 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
     }
 
 def format_report(stats: Dict) -> str:
-    """Форматирование отчета в стиле вашего примера"""
+    """Форматирование отчета"""
     date_from = stats['date_from']
     date_to = stats['date_to']
     
@@ -262,11 +286,6 @@ def format_report(stats: Dict) -> str:
         date_name = format_date_ru(date_name)
     else:
         date_name = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-    
-    # Простая динамика
-    income_diff = 0
-    if stats['avg_daily'] > 0:
-        income_diff = 15.5
     
     result = f"""📊 *RAW DATA {stats['club_name']}*
 {date_name}
@@ -297,8 +316,7 @@ def format_report(stats: Dict) -> str:
     
     result += f"""
 📈 *Аналитика:*
-• Выручка {income_diff:+.1f}% к среднему
-• Средний чек: {stats['avg_check']:,.0f} ₽
+• Всего операций: {stats['raw_count']}
 
 #дайджест #ежедневный"""
     
@@ -366,8 +384,12 @@ async def about(message: types.Message):
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Источник данных:* /all_operations_log/list\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД\n\n"
-        "🍔 *В топ товаров включаются только реальные товары бара*\n"
-        "• Исключены: списание баланса, инкассация, служебные операции\n\n"
+        "🍔 *В топ товаров включаются:*\n"
+        "• Напитки (Флеш, Добрый, Кола, Липтон и др.)\n"
+        "• Еда (Чиабатта, Кацу, Чебупели, Ходстеры)\n"
+        "• Сладости (Сникерс, Баунти, Твикс, Милка)\n"
+        "• Пиво, кальяны, снеки\n\n"
+        "❌ *Исключены:* списание баланса, инкассация, служебные операции\n\n"
         "💡 Данные обновляются в реальном времени",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
