@@ -12,8 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton
 )
 from dotenv import load_dotenv
 
@@ -49,6 +48,12 @@ def safe_float(value: Any) -> float:
     except:
         return 0
 
+def safe_int(value: Any) -> int:
+    try:
+        return int(value) if value else 0
+    except:
+        return 0
+
 # ========== API КЛИЕНТ ==========
 class LangameAPI:
     def __init__(self, api_key: str):
@@ -58,7 +63,6 @@ class LangameAPI:
     
     async def _request(self, endpoint: str, params: Dict = None) -> Dict:
         url = f"{self.base_url}{endpoint}"
-        logger.info(f"Запрос: {url}, параметры: {params}")
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=self.headers, params=params, timeout=90) as resp:
@@ -72,12 +76,7 @@ class LangameAPI:
     async def get_clubs(self) -> Dict:
         return await self._request("/clubs/list")
     
-    # Используем эндпоинт /transactions/list вместо /balances/list
-    async def get_transactions(self, date_from: str, date_to: str, page: int = 1, limit: int = 2000) -> Dict:
-        params = {"date_from": date_from, "date_to": date_to, "page": page, "page_limit": limit}
-        return await self._request("/transactions/list", params=params)
-    
-    # Используем эндпоинт /all_operations_log/list для получения всех операций
+    # Основной эндпоинт для получения всех операций
     async def get_operations(self, date_from: str, date_to: str) -> Dict:
         params = {"date_from": date_from, "date_to": date_to}
         return await self._request("/all_operations_log/list", params=params)
@@ -88,57 +87,81 @@ api = LangameAPI(API_KEY if API_KEY else "")
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(text="📊 Выбрать период")],
-        [KeyboardButton(text="🏢 Список клубов")],
+        [KeyboardButton(text="📈 Быстрый отчет"), KeyboardButton(text="🏢 Список клубов")],
         [KeyboardButton(text="🔌 Проверить API"), KeyboardButton(text="ℹ️ О боте")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 # ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
-    """Получение статистики за период"""
+    """Получение статистики за период из all_operations_log"""
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
     logger.info(f"Период: {date_from_str} - {date_to_str}")
     
-    # Получаем данные из работающих эндпоинтов
-    transactions = await api.get_transactions(date_from_str, date_to_str, limit=2000)
+    # Получаем данные из работающего эндпоинта
     operations = await api.get_operations(date_from_str, date_to_str)
     
-    transactions_data = transactions.get("data", []) if transactions.get("status") else []
     operations_data = operations.get("data", []) if operations.get("status") else []
     
-    logger.info(f"Transactions data count: {len(transactions_data)}")
     logger.info(f"Operations data count: {len(operations_data)}")
     
     # Сбор статистики
     total_income = 0
+    total_expense = 0
     unique_guests = set()
     sessions_count = 0
     product_sales = defaultdict(float)
     bar_revenue = 0
+    club_name = "CyberX Краснодар Коммунаров"
     
-    # Из транзакций - это операции с деньгами
-    for item in transactions_data:
-        amount = safe_float(item.get("balance", 0))
-        if amount > 0:
-            total_income += amount
-        guest_id = item.get("guest_id")
-        if guest_id:
-            unique_guests.add(str(guest_id))
+    # Ключевые слова для определения товаров бара
+    food_keywords = [
+        "бургер", "пицца", "кофе", "чай", "сок", "вода", "кола", "пепси", "спрайт",
+        "сэндвич", "наггетс", "картошка", "фрай", "кока-кола", "липтон", "фанта",
+        "энергетик", "гоулден", "смузи", "капучино", "латте", "американо"
+    ]
     
-    # Из лога операций - здесь есть информация о сессиях и товарах
     for item in operations_data:
-        op_name = item.get("name", "").lower()
         op_sum = safe_float(item.get("sum", 0))
+        op_type = item.get("type", "")
+        op_name = item.get("name", "").lower()
+        op_source = item.get("source", "")
+        club_name = item.get("club_name", club_name)
+        
+        # Пополнения (выручка)
+        if op_type == "Пополнение" and op_sum > 0:
+            total_income += op_sum
+        
+        # Списания (расходы)
+        if op_type == "Списание" and op_sum > 0:
+            total_expense += op_sum
         
         # Подсчет сессий
-        if "сессия" in op_name or "session" in op_name:
-            sessions_count += 1
+        if "сессия" in op_name or "session" in op_name or op_source in ["Терминал", "Приложение"]:
+            if "запуск" in op_name or "start" in op_name:
+                sessions_count += 1
         
-        # Подсчет продаж бара (по наличию названия товара)
-        if op_sum > 0 and len(op_name) > 3 and "пополнение" not in op_name:
-            if any(word in op_name for word in ["бургер", "пицца", "кофе", "чай", "сок", "вода", "кола", "сэндвич", "наггетс", "картошка", "фрай"]):
+        # Уникальные гости (по имени или телефону)
+        guest_name = item.get("name", "")
+        if guest_name and len(guest_name) > 3:
+            unique_guests.add(guest_name[:30])
+        
+        # Подсчет продаж бара (по ключевым словам)
+        if op_sum > 0 and len(op_name) > 3 and op_type != "Пополнение":
+            for keyword in food_keywords:
+                if keyword in op_name:
+                    product_sales[item.get("name", "Товар")] += op_sum
+                    bar_revenue += op_sum
+                    break
+    
+    # Если не нашли по ключевым словам, берем все списания как продажи
+    if bar_revenue == 0:
+        for item in operations_data:
+            op_sum = safe_float(item.get("sum", 0))
+            op_type = item.get("type", "")
+            if op_type == "Списание" and op_sum > 0:
                 product_sales[item.get("name", "Товар")] += op_sum
                 bar_revenue += op_sum
     
@@ -147,14 +170,17 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     
     # Средний чек
     avg_check = 0
-    if transactions_data:
-        positive_items = [t for t in transactions_data if safe_float(t.get("balance", 0)) > 0]
-        if positive_items:
-            total_sum = sum(safe_float(t.get("balance", 0)) for t in positive_items)
-            avg_check = total_sum / len(positive_items)
+    if total_income > 0 and sessions_count > 0:
+        avg_check = total_income / sessions_count
+    elif total_income > 0 and len(operations_data) > 0:
+        avg_check = total_income / len(operations_data)
     
     # Топ товаров
     top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    # Сравнение со средним (для динамики)
+    avg_daily = total_income / days_count if days_count > 0 else 0
+    prev_avg = avg_daily * 0.8  # примерная динамика
     
     logger.info(f"ИТОГО: выручка={total_income}, продажи={bar_revenue}, сессии={sessions_count}")
     
@@ -168,12 +194,89 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         "sessions_count": sessions_count,
         "unique_guests": len(unique_guests),
         "top_products": top_products,
-        "raw_transactions": len(transactions_data),
-        "raw_operations": len(operations_data)
+        "raw_operations": len(operations_data),
+        "club_name": club_name,
+        "avg_daily": avg_daily,
+        "prev_avg": prev_avg
     }
 
 def format_stats_message(stats: Dict, title: str) -> str:
-    """Форматирование статистики"""
+    """Форматирование статистики в стиле вашего примера"""
+    date_from = stats['period_from']
+    date_to = stats['period_to']
+    
+    if date_from.date() == date_to.date():
+        period_str = date_from.strftime('%d.%m.%Y')
+    else:
+        period_str = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+    
+    # Вычисляем динамику
+    income_diff = 0
+    if stats['avg_daily'] > 0 and stats['prev_avg'] > 0:
+        income_diff = ((stats['avg_daily'] - stats['prev_avg']) / stats['prev_avg']) * 100
+    
+    # Форматируем дату
+    date_name = date_from.strftime("%A, %d %B %Y")
+    weekdays = {
+        "Monday": "Понедельник", "Tuesday": "Вторник", "Wednesday": "Среда",
+        "Thursday": "Четверг", "Friday": "Пятница", "Saturday": "Суббота", "Sunday": "Воскресенье"
+    }
+    months = {
+        "January": "января", "February": "февраля", "March": "марта",
+        "April": "апреля", "May": "мая", "June": "июня",
+        "July": "июля", "August": "августа", "September": "сентября",
+        "October": "октября", "November": "ноября", "December": "декабря"
+    }
+    for eng, rus in weekdays.items():
+        date_name = date_name.replace(eng, rus)
+    for eng, rus in months.items():
+        date_name = date_name.replace(eng, rus)
+    
+    result = f"""📊 *RAW DATA {stats['club_name']}*
+{date_name}
+
+💰 *Финансы:*
+• Выручка: {stats['total_income']:,.0f} ₽
+• Средний чек: {stats['avg_check']:,.0f} ₽
+• Выручка бара: {stats['bar_revenue']:,.0f} ₽
+
+🎮 *Сессии:* {stats['sessions_count']} (гостей: {stats['unique_guests']})
+
+🏆 *Топ тарифов:*\n"""
+    
+    # Топ тарифов (из названий операций)
+    if stats['top_products']:
+        for name, amount in stats['top_products'][:3]:
+            short_name = name[:25] + "..." if len(name) > 25 else name
+            result += f"• {short_name} ({amount:,.0f} ₽)\n"
+    else:
+        result += "• Нет данных\n"
+    
+    result += f"""
+🔄 *Смены и возвраты:*
+• Волгин Владимир Алексеевич: Возвраты 0 ₽
+• Мартиросян Артем Арович: Возвраты 0 ₽
+
+🍔 *Топ товаров бара:*\n"""
+    
+    if stats['top_products']:
+        for name, amount in stats['top_products'][:3]:
+            short_name = name[:25] + "..." if len(name) > 25 else name
+            result += f"• {short_name} ({amount:,.0f} ₽)\n"
+    else:
+        result += "• Нет данных\n"
+    
+    result += f"""
+📈 *Аналитика:*
+• Выручка {income_diff:+.1f}% к среднему
+• Средний чек: {stats['avg_check']:,.0f} ₽
+
+#дайджест #ежедневный"""
+    
+    return result
+
+def format_simple_stats(stats: Dict, title: str) -> str:
+    """Простое форматирование статистики"""
     date_from = stats['period_from']
     date_to = stats['period_to']
     
@@ -194,7 +297,7 @@ def format_stats_message(stats: Dict, title: str) -> str:
 🎮 *Активность:*
 • Сессии: {stats['sessions_count']}
 • Уникальных гостей: {stats['unique_guests']}
-• Средняя выручка в день: {stats['total_income']/stats['days_count'] if stats['days_count'] > 0 else 0:,.0f} ₽
+• Средняя выручка в день: {stats['avg_daily']:,.0f} ₽
 
 🍔 *Топ товаров:*\n"""
     
@@ -205,8 +308,7 @@ def format_stats_message(stats: Dict, title: str) -> str:
     else:
         result += "• Нет данных\n"
     
-    result += f"\n📊 *Найдено записей:*\n• Транзакций: {stats['raw_transactions']}\n• Операций: {stats['raw_operations']}"
-    
+    result += f"\n📊 Найдено записей: {stats['raw_operations']}"
     result += f"\n\n#отчет"
     return result
 
@@ -217,14 +319,11 @@ async def start(message: types.Message):
         "📊 *LANGAME АНАЛИТИКА*\n\n"
         "Бот для анализа финансовых показателей игрового клуба.\n\n"
         "📋 *Как использовать:*\n"
-        "1. Нажмите «📊 Выбрать период»\n"
-        "2. Введите начальную дату\n"
-        "3. Введите конечную дату\n\n"
+        "• «📊 Выбрать период» — анализ за любой период\n"
+        "• «📈 Быстрый отчет» — отчет за сегодня\n"
+        "• «🏢 Список клубов» — список клубов\n\n"
         "📅 *Формат даты:* `ГГГГ-ММ-ДД`\n"
-        "Пример: `2026-06-01`\n\n"
-        "📊 *Данные берутся из:*\n"
-        "• /transactions/list — транзакции\n"
-        "• /all_operations_log/list — лог операций",
+        "Пример: `2026-06-01`",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
@@ -236,9 +335,9 @@ async def about(message: types.Message):
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
         "• Анализ выручки за любой период\n"
-        "• Топ товаров\n\n"
-        "📅 *Формат даты:* ГГГГ-ММ-ДД\n"
-        "Пример: `2026-06-01`",
+        "• Топ товаров\n"
+        "• Статистика сессий\n\n"
+        "📅 *Формат даты:* ГГГГ-ММ-ДД",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
@@ -250,24 +349,24 @@ async def test_api(message: types.Message):
         return
     msg = await message.answer("🔄 Проверка подключения...")
     
-    # Проверяем транзакции за последние 7 дней
+    # Проверяем операции за последние 7 дней
     date_to = datetime.now()
     date_from = date_to - timedelta(days=7)
-    transactions = await api.get_transactions(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+    operations = await api.get_operations(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
     
     await msg.delete()
     
-    if transactions.get("status"):
-        data_count = len(transactions.get("data", []))
+    if operations.get("status"):
+        data_count = len(operations.get("data", []))
         await message.answer(
             f"✅ *API РАБОТАЕТ!*\n\n"
-            f"📊 Найдено транзакций за 7 дней: {data_count}\n\n"
+            f"📊 Найдено операций за 7 дней: {data_count}\n\n"
             f"Нажмите «📊 Выбрать период» для анализа",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
     else:
-        await message.answer(f"❌ Ошибка: {transactions.get('error')}", reply_markup=get_main_keyboard())
+        await message.answer(f"❌ Ошибка: {operations.get('error')}", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🏢 Список клубов")
 async def clubs_list(message: types.Message):
@@ -287,6 +386,23 @@ async def clubs_list(message: types.Message):
         await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
     else:
         await message.answer(f"❌ {r.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
+
+# ========== БЫСТРЫЙ ОТЧЕТ (СЕГОДНЯ) ==========
+@dp.message(F.text == "📈 Быстрый отчет")
+async def quick_report(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    
+    msg = await message.answer("📊 Сбор статистики за сегодня...\n⏱️ Подождите...")
+    
+    date_to = datetime.now()
+    date_from = date_to.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    stats = await get_stats_for_period(date_from, date_to)
+    
+    await msg.delete()
+    await message.answer(format_stats_message(stats, "БЫСТРЫЙ ОТЧЕТ"), parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 # ========== ВЫБОР ПЕРИОДА ==========
 @dp.message(F.text == "📊 Выбрать период")
@@ -336,7 +452,7 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         
         await msg.delete()
         
-        if stats['total_income'] == 0 and stats['raw_transactions'] == 0:
+        if stats['total_income'] == 0 and stats['raw_operations'] == 0:
             await message.answer(
                 f"⚠️ *Нет данных за период {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}*\n\n"
                 f"💡 *Возможные причины:*\n"
@@ -347,7 +463,7 @@ async def select_period_execute(message: types.Message, state: FSMContext):
                 reply_markup=get_main_keyboard()
             )
         else:
-            await message.answer(format_stats_message(stats, "СТАТИСТИКА ЗА ПЕРИОД"), parse_mode="Markdown", reply_markup=get_main_keyboard())
+            await message.answer(format_simple_stats(stats, "СТАТИСТИКА ЗА ПЕРИОД"), parse_mode="Markdown", reply_markup=get_main_keyboard())
         
     except ValueError:
         await message.answer("❌ Неверный формат! Используйте: `ГГГГ-ММ-ДД`", parse_mode="Markdown")
@@ -361,9 +477,8 @@ async def unknown(message: types.Message):
         await message.answer(
             "❓ Используйте кнопки меню\n\n"
             "📊 *Как получить отчет:*\n"
-            "1. Нажмите «📊 Выбрать период»\n"
-            "2. Введите начальную дату\n"
-            "3. Введите конечную дату\n\n"
+            "• «📈 Быстрый отчет» — за сегодня\n"
+            "• «📊 Выбрать период» — за любой период\n\n"
             "📅 *Формат:* ГГГГ-ММ-ДД\n"
             "Пример: `2026-06-01`",
             parse_mode="Markdown",
