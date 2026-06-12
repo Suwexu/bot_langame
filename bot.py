@@ -59,40 +59,40 @@ class LangameAPI:
         self.last_error = None
     
     async def test_connection(self) -> Dict:
-        """Тестирование подключения к API"""
+        """Тестирование подключения к API через /all_operations_log/list"""
         logger.info("Testing API connection...")
         
         if not self.api_key or self.api_key == "MISSING_API_KEY":
             self.connection_status = False
             return {"success": False, "error": "API ключ не настроен"}
         
-        # Тестируем эндпоинт /clubs/list (без /v1, как в спецификации)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.base_url}/clubs/list",
-                    headers=self.headers,
-                    timeout=10
-                ) as resp:
-                    logger.info(f"Test endpoint status: {resp.status}")
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("status"):
-                            self.connection_status = True
-                            clubs_count = len(data.get("data", []))
-                            return {"success": True, "clubs_count": clubs_count}
-                        else:
-                            self.connection_status = False
-                            return {"success": False, "error": data.get("detail", "Unknown error")}
-                    elif resp.status == 403:
-                        self.connection_status = False
-                        return {"success": False, "error": "Неверный API ключ (403 Forbidden)"}
-                    else:
-                        self.connection_status = False
-                        return {"success": False, "error": f"HTTP {resp.status}"}
-        except Exception as e:
-            self.connection_status = False
-            return {"success": False, "error": str(e)}
+        # Тестируем эндпоинт /all_operations_log/list (как в вашем примере)
+        test_endpoints = [
+            "/all_operations_log/list",
+            "/clubs/list", 
+            "/guests/list"
+        ]
+        
+        for endpoint in test_endpoints:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{self.base_url}{endpoint}",
+                        headers=self.headers,
+                        timeout=10
+                    ) as resp:
+                        logger.info(f"Test {endpoint} - status: {resp.status}")
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("status"):
+                                self.connection_status = True
+                                return {"success": True, "working_endpoint": endpoint}
+            except Exception as e:
+                logger.warning(f"Endpoint {endpoint} failed: {e}")
+                continue
+        
+        self.connection_status = False
+        return {"success": False, "error": "Ни один из эндпоинтов не ответил успешно. Проверьте API ключ."}
     
     async def request(self, endpoint: str, method: str = "GET", data: Dict = None) -> Dict:
         """Выполнение запроса к API"""
@@ -122,38 +122,40 @@ class LangameAPI:
                 return {"status": False, "error": str(e)}
     
     async def get_clubs(self) -> Dict:
-        """Получить список клубов - эндпоинт /clubs/list"""
         return await self.request("/clubs/list")
     
     async def get_balances(self, page: int = 1, limit: int = 20) -> Dict:
-        """Получить балансы гостей - эндпоинт /guests/balance"""
         return await self.request("/guests/balance", data={"page": page, "page_limit": limit})
     
     async def get_bonus_balances(self, page: int = 1, limit: int = 20) -> Dict:
-        """Получить бонусные балансы - эндпоинт /guests/bonus_balance"""
         return await self.request("/guests/bonus_balance", data={"page": page, "page_limit": limit})
     
     async def get_transactions(self, date_from: str, date_to: str, page: int = 1, limit: int = 20) -> Dict:
-        """Получить транзакции - эндпоинт /transactions/list"""
         return await self.request(
             "/transactions/list",
             data={"page": page, "page_limit": limit, "date_from": date_from, "date_to": date_to}
         )
     
     async def search_guest(self, search_data: Dict) -> Dict:
-        """Поиск гостя - эндпоинт /guests/search (POST)"""
         return await self.request("/guests/search", method="POST", data=search_data)
     
     async def get_guest_sessions(self, guest_id: int, page: int = 1, limit: int = 10) -> Dict:
-        """Получить сессии гостя - эндпоинт /guests/sessions"""
         return await self.request(
             "/guests/sessions",
             data={"guest_id": guest_id, "page": page, "page_limit": limit}
         )
     
     async def get_pc_list(self) -> Dict:
-        """Получить список ПК - эндпоинт /global/linking_pc_by_type/list"""
         return await self.request("/global/linking_pc_by_type/list")
+    
+    async def get_operations_log(self, date_from: str = None, date_to: str = None) -> Dict:
+        """Получить лог операций - /all_operations_log/list"""
+        params = {}
+        if date_from:
+            params["date_from"] = date_from
+        if date_to:
+            params["date_to"] = date_to
+        return await self.request("/all_operations_log/list", data=params)
 
 api = LangameAPI(API_KEY if API_KEY else "MISSING_API_KEY", API_BASE_URL)
 
@@ -163,7 +165,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="🔌 Проверить API")],
         [KeyboardButton(text="🏢 Клубы")],
         [KeyboardButton(text="💰 Балансы"), KeyboardButton(text="🎁 Бонусы")],
-        [KeyboardButton(text="💸 Транзакции"), KeyboardButton(text="🖥️ Компьютеры")],
+        [KeyboardButton(text="💸 Транзакции"), KeyboardButton(text="📋 Лог операций")],
         [KeyboardButton(text="👤 Поиск гостя"), KeyboardButton(text="🎮 Сессии")],
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="ℹ️ О боте")]
     ]
@@ -207,10 +209,7 @@ def format_clubs(data: Dict) -> str:
 
 def format_balances(data: Dict) -> str:
     if not data.get("status"):
-        error = data.get('error', 'Unknown error')
-        if "403" in error:
-            return "❌ ОШИБКА АВТОРИЗАЦИИ\n\nПроверьте API ключ. Возможно, у него нет доступа."
-        return f"❌ Ошибка: {error}"
+        return f"❌ Ошибка: {data.get('error', 'Unknown error')}"
     
     balances = data.get("data", [])
     if not balances:
@@ -221,8 +220,7 @@ def format_balances(data: Dict) -> str:
     for item in balances[:15]:
         balance = float(item.get('balance', 0))
         total += balance
-        guest_id = item.get('guest_id')
-        result += f"• Гость #{guest_id}: {balance:,.2f} ₽\n"
+        result += f"• Гость #{item.get('guest_id')}: {balance:,.2f} ₽\n"
     
     if len(balances) > 15:
         result += f"\n📊 Показано 15 из {len(balances)} записей"
@@ -258,6 +256,39 @@ def format_transactions(data: Dict) -> str:
     result += f"\n💰 Общая сумма пополнений: {total:,.2f} ₽"
     return result
 
+def format_operations_log(data: Dict) -> str:
+    """Форматирование лога операций"""
+    if not data.get("status"):
+        return f"❌ Ошибка: {data.get('error', 'Unknown error')}"
+    
+    operations = data.get("data", [])
+    if not operations:
+        return "📭 Операции не найдены"
+    
+    result = "📋 ЛОГ ОПЕРАЦИЙ\n\n"
+    for op in operations[:10]:
+        date = op.get('date_normal', 'N/A')[:16] if op.get('date_normal') else 'N/A'
+        op_type = op.get('type', 'Unknown')
+        op_name = op.get('name', '')
+        op_sum = op.get('sum', 0)
+        op_source = op.get('source', '')
+        
+        type_icon = "💰" if op_type == "Пополнение" else "💸"
+        result += f"{type_icon} {date}\n"
+        result += f"   Тип: {op_type}\n"
+        if op_name:
+            result += f"   Название: {op_name}\n"
+        if op_sum:
+            result += f"   Сумма: {op_sum:,.2f} ₽\n"
+        if op_source:
+            result += f"   Источник: {op_source}\n"
+        result += "─" * 25 + "\n"
+    
+    if len(operations) > 10:
+        result += f"\n📊 Показано 10 из {len(operations)} записей"
+    
+    return result
+
 # ========== ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -271,7 +302,7 @@ async def cmd_start(message: types.Message):
 • 💰 Балансы гостей
 • 🎁 Бонусные балансы
 • 💸 История транзакций
-• 🖥️ Список компьютеров
+• 📋 Лог операций
 • 👤 Поиск гостей
 • 🎮 Игровые сессии
 • 📊 Финансовая статистика
@@ -293,7 +324,7 @@ async def cmd_help(message: types.Message):
 💰 Балансы - Денежные балансы гостей
 🎁 Бонусы - Бонусные балансы
 💸 Транзакции - История операций за 7 дней
-🖥️ Компьютеры - Список ПК в клубах
+📋 Лог операций - Все операции (пополнения/списания)
 👤 Поиск гостя - Поиск по телефону/ID/ФИО
 🎮 Сессии - История игровых сессий
 📊 Статистика - Финансовая аналитика
@@ -312,17 +343,17 @@ async def back_to_main(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api_connection(message: types.Message):
-    msg = await message.answer("🔄 Проверка подключения к API...\n\nТестирую endpoint: /clubs/list")
+    msg = await message.answer("🔄 Проверка подключения к API...\n\nТестирую несколько эндпоинтов...")
     
     result = await api.test_connection()
     
     if result["success"]:
-        clubs_count = result.get("clubs_count", 0)
+        working_endpoint = result.get("working_endpoint", "unknown")
         response_text = f"""✅ API ПОДКЛЮЧЕНИЕ УСПЕШНО!
 
 📊 Статус: Работает
 🔑 API Key: Настроен
-🏢 Доступно клубов: {clubs_count}
+✅ Работает эндпоинт: {working_endpoint}
 🌐 API URL: {API_BASE_URL}
 
 🎉 Бот готов к работе! Используйте остальные кнопки меню."""
@@ -338,7 +369,10 @@ async def test_api_connection(message: types.Message):
 2. У ключа нет доступа к API
 3. Проблемы с сервером LANGAME
 
-📝 Решение: Обратитесь к администратору LANGAME для получения корректного API ключа и проверки прав доступа."""
+📝 Решение: 
+• Проверьте API ключ в настройках Railway
+• Убедитесь, что ключ действителен
+• Обратитесь к администратору LANGAME"""
     
     await msg.edit_text(response_text)
     logger.info(f"API test result: {result['success']}")
@@ -349,7 +383,7 @@ async def about_bot(message: types.Message):
     
     about_text = f"""🤖 О БОТЕ LANGAME
 
-Версия: 1.3.0
+Версия: 1.4.0
 Платформа: Railway
 
 📌 СТАТУС API:
@@ -428,32 +462,20 @@ async def show_transactions(message: types.Message):
     result = format_transactions(response)
     await msg.edit_text(result)
 
-@dp.message(F.text == "🖥️ Компьютеры")
-async def show_pc_list(message: types.Message):
-    msg = await message.answer("🔄 Загрузка списка компьютеров...", reply_markup=get_back_keyboard())
+@dp.message(F.text == "📋 Лог операций")
+async def show_operations_log(message: types.Message):
+    msg = await message.answer("🔄 Загрузка лога операций за 7 дней...", reply_markup=get_back_keyboard())
     
     if not API_KEY:
         await msg.edit_text("❌ API ключ не настроен!")
         return
     
-    response = await api.get_pc_list()
+    date_to = datetime.now().strftime("%Y-%m-%d")
+    date_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     
-    if response.get("status") and response.get("data"):
-        pcs = response["data"]
-        result = "🖥️ СПИСОК КОМПЬЮТЕРОВ\n\n"
-        for pc in pcs[:20]:
-            name = pc.get('name', 'Без имени')
-            fiscal_name = pc.get('fiscal_name', '')
-            is_ps = pc.get('isPS')
-            icon = "🎮" if is_ps else "🖥️"
-            result += f"{icon} {name}\n"
-            if fiscal_name:
-                result += f"   📍 {fiscal_name}\n"
-            result += "\n"
-        result += f"\n📊 Всего ПК: {len(pcs)}"
-        await msg.edit_text(result)
-    else:
-        await msg.edit_text(f"❌ Ошибка: {response.get('error', 'Unknown')}")
+    response = await api.get_operations_log(date_from, date_to)
+    result = format_operations_log(response)
+    await msg.edit_text(result)
 
 @dp.message(F.text == "👤 Поиск гостя")
 async def search_guest_prompt(message: types.Message):
@@ -606,7 +628,7 @@ async def show_stats(message: types.Message):
 
 @dp.message()
 async def handle_unknown(message: types.Message):
-    if not message.text.startswith("/") and message.text not in ["🔌 Проверить API", "🏢 Клубы", "💰 Балансы", "🎁 Бонусы", "💸 Транзакции", "🖥️ Компьютеры", "👤 Поиск гостя", "🎮 Сессии", "📊 Статистика", "ℹ️ О боте", "◀️ Назад"]:
+    if not message.text.startswith("/") and message.text not in ["🔌 Проверить API", "🏢 Клубы", "💰 Балансы", "🎁 Бонусы", "💸 Транзакции", "📋 Лог операций", "👤 Поиск гостя", "🎮 Сессии", "📊 Статистика", "ℹ️ О боте", "◀️ Назад"]:
         await message.answer(
             "❓ Используйте кнопки меню или команду /help\n\n🔧 Первым делом нажмите '🔌 Проверить API'",
             reply_markup=get_main_keyboard()
