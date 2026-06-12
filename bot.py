@@ -12,7 +12,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton
 )
 from dotenv import load_dotenv
 
@@ -31,10 +32,11 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не указан!")
 
 # ========== СОСТОЯНИЯ ==========
-class CustomPeriodState(StatesGroup):
+class SelectClubState(StatesGroup):
     waiting_club_id = State()
-    waiting_date_from = State()
-    waiting_date_to = State()
+    waiting_period_type = State()
+    waiting_custom_date_from = State()
+    waiting_custom_date_to = State()
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=BOT_TOKEN)
@@ -77,39 +79,41 @@ class LangameAPI:
     async def get_clubs(self) -> Dict:
         return await self._request("/clubs/list")
     
-    async def get_balances_list(self, date_from: str, date_to: str, page: int = 1, limit: int = 2000) -> Dict:
-        return await self._request("/balances/list", params={
-            "date_from": date_from, "date_to": date_to, "page": page, "page_limit": limit
-        })
+    async def get_balances_list(self, date_from: str, date_to: str, club_id: int = None, page: int = 1, limit: int = 2000) -> Dict:
+        params = {"date_from": date_from, "date_to": date_to, "page": page, "page_limit": limit}
+        if club_id:
+            params["club_id"] = club_id
+        return await self._request("/balances/list", params=params)
     
-    async def get_products_expense(self, date_from: str = None, date_to: str = None, page: int = 1, limit: int = 2000) -> Dict:
+    async def get_products_expense(self, date_from: str = None, date_to: str = None, club_id: int = None, page: int = 1, limit: int = 2000) -> Dict:
         params = {"page": page, "page_limit": limit}
         if date_from:
             params["date_from"] = date_from
         if date_to:
             params["date_to"] = date_to
+        if club_id:
+            params["club_id"] = club_id
         return await self._request("/products/expense", params=params)
-    
-    async def get_operations_log(self, date_from: str = None, date_to: str = None) -> Dict:
-        params = {}
-        if date_from:
-            params["date_from"] = date_from
-        if date_to:
-            params["date_to"] = date_to
-        return await self._request("/all_operations_log/list", params=params)
 
 api = LangameAPI(API_KEY if API_KEY else "")
 
-# ========== КЛАВИАТУРА ==========
+# ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     buttons = [
-        [KeyboardButton(text="📊 За сегодня"), KeyboardButton(text="📈 За вчера")],
-        [KeyboardButton(text="📅 За неделю"), KeyboardButton(text="📆 За месяц")],
-        [KeyboardButton(text="🎯 Свой период")],
-        [KeyboardButton(text="🍔 Топ товаров"), KeyboardButton(text="🏢 Клубы")],
+        [KeyboardButton(text="🏢 Выбрать клуб и период")],
+        [KeyboardButton(text="🍔 Топ товаров")],
         [KeyboardButton(text="🔌 Проверить API"), KeyboardButton(text="ℹ️ О боте")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+def get_period_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Сегодня", callback_data="period_today")],
+        [InlineKeyboardButton(text="📈 Вчера", callback_data="period_yesterday")],
+        [InlineKeyboardButton(text="📅 Неделя (7 дней)", callback_data="period_week")],
+        [InlineKeyboardButton(text="📆 Месяц (30 дней)", callback_data="period_month")],
+        [InlineKeyboardButton(text="🎯 Свой период", callback_data="period_custom")]
+    ])
 
 # ========== ФОРМАТИРОВАНИЕ ==========
 def format_date_ru(date_str: str) -> str:
@@ -130,18 +134,22 @@ def format_date_ru(date_str: str) -> str:
     return date_str
 
 # ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ ==========
-async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
-    """Получение статистики за период"""
+async def get_stats_for_period(date_from: datetime, date_to: datetime, club_id: int) -> Dict:
+    """Получение статистики за период для конкретного клуба"""
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
-    # Получаем данные
-    balances = await api.get_balances_list(date_from_str, date_to_str, limit=2000)
-    products = await api.get_products_expense(date_from_str, date_to_str, limit=2000)
+    logger.info(f"Клуб ID: {club_id}, период: {date_from_str} - {date_to_str}")
     
-    # Извлекаем данные
+    # Получаем данные
+    balances = await api.get_balances_list(date_from_str, date_to_str, club_id=club_id, limit=2000)
+    products = await api.get_products_expense(date_from_str, date_to_str, club_id=club_id, limit=2000)
+    
     balances_data = balances.get("data", []) if balances.get("status") else []
     products_data = products.get("data", []) if products.get("status") else []
+    
+    logger.info(f"Найдено пополнений: {len(balances_data)}")
+    logger.info(f"Найдено продаж: {len(products_data)}")
     
     # Сбор статистики
     total_income = 0
@@ -186,10 +194,11 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     # Количество дней
     days_count = max((date_to - date_from).days + 1, 1)
     
-    # Подсчет сессий (примерно)
+    # Подсчет сессий (из пополнений с пометкой о сессии)
     sessions_count = 0
     for item in balances_data:
-        if "сессия" in item.get("guest_name", "").lower():
+        guest_name = item.get("guest_name", "").lower()
+        if "сессия" in guest_name or "session" in guest_name:
             sessions_count += 1
     
     # Топ товаров
@@ -206,8 +215,7 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         "unique_guests": len(unique_guests),
         "top_products": top_products,
         "product_details": product_details,
-        "raw_balances": len(balances_data),
-        "raw_products": len(products_data)
+        "club_id": club_id
     }
 
 def format_stats_message(stats: Dict, title: str) -> str:
@@ -222,6 +230,7 @@ def format_stats_message(stats: Dict, title: str) -> str:
     
     result = f"""📊 *{title}*
 
+🏢 Клуб ID: {stats['club_id']}
 📅 Период: {period_str}
 
 💰 *Финансы:*
@@ -248,7 +257,7 @@ def format_stats_message(stats: Dict, title: str) -> str:
 
 def format_products_message(stats: Dict) -> str:
     if not stats['product_details']:
-        return "🍔 *Нет данных о продажах за указанный период*"
+        return f"🍔 *Нет данных о продажах за указанный период для клуба {stats['club_id']}*"
     
     products_grouped = defaultdict(lambda: {"count": 0, "sum": 0})
     for p in stats['product_details']:
@@ -259,6 +268,7 @@ def format_products_message(stats: Dict) -> str:
     
     result = f"""🍔 *ТОП ТОВАРОВ ЗА ПЕРИОД*
 
+🏢 Клуб ID: {stats['club_id']}
 📅 {stats['period_from'].strftime('%d.%m.%Y')} - {stats['period_to'].strftime('%d.%m.%Y')}
 
 💰 *Общая выручка бара:* {stats['bar_revenue']:,.0f} ₽
@@ -278,14 +288,14 @@ async def start(message: types.Message):
     await message.answer(
         "📊 *LANGAME АНАЛИТИКА*\n\n"
         "Бот для анализа финансовых показателей игрового клуба.\n\n"
-        "📋 *Доступные функции:*\n"
-        "• 📊 За сегодня — статистика за текущий день\n"
-        "• 📈 За вчера — статистика за предыдущий день\n"
-        "• 📅 За неделю — статистика за 7 дней\n"
-        "• 📆 За месяц — статистика за 30 дней\n"
-        "• 🎯 Свой период — любой диапазон дат\n"
-        "• 🍔 Топ товаров — детальный отчет по товарам\n\n"
-        "Используйте кнопки ниже 👇",
+        "📋 *Как использовать:*\n"
+        "1. Нажмите «🏢 Выбрать клуб и период»\n"
+        "2. Введите ID клуба (узнайте через кнопку «🏢 Список клубов» ниже)\n"
+        "3. Выберите период анализа\n\n"
+        "👇 *Кнопки:*\n"
+        "• 🏢 Список клубов — показывает ID всех клубов\n"
+        "• 🔌 Проверить API — проверка подключения\n"
+        "• 🍔 Топ товаров — отдельный отчет по товарам",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
@@ -315,138 +325,148 @@ async def test_api(message: types.Message):
     await msg.delete()
     
     if clubs.get("status"):
-        await message.answer(f"✅ API РАБОТАЕТ!\n\n🏢 Доступно клубов: {len(clubs.get('data', []))}", reply_markup=get_main_keyboard())
+        clubs_data = clubs.get("data", [])
+        await message.answer(f"✅ API РАБОТАЕТ!\n\n🏢 Доступно клубов: {len(clubs_data)}\n\nНажмите «🏢 Список клубов» чтобы увидеть ID", reply_markup=get_main_keyboard())
     else:
         await message.answer(f"❌ Ошибка: {clubs.get('error')}", reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "🏢 Клубы")
+@dp.message(F.text == "🏢 Список клубов")
 async def clubs_list(message: types.Message):
     if not API_KEY:
         await message.answer("❌ API ключ не настроен!")
         return
     
-    msg = await message.answer("🔄 Загрузка...")
+    msg = await message.answer("🔄 Загрузка списка клубов...")
     r = await api.get_clubs()
     await msg.delete()
     
     if r.get("status") and r.get("data"):
         result = "🏢 *СПИСОК КЛУБОВ*\n\n"
         for club in r["data"]:
-            result += f"📌 {club.get('name', '—')} (ID: {club.get('id')})\n"
+            status = "🟢" if club.get("active") else "🔴"
+            result += f"{status} *{club.get('name', '—')}* — ID: `{club.get('id')}`\n"
+        result += "\n💡 Для анализа введите ID клуба"
         await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
     else:
         await message.answer(f"❌ {r.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
 
-# ========== СТАТИСТИКА ==========
-@dp.message(F.text == "📊 За сегодня")
-async def stats_today(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    
-    msg = await message.answer("📊 Сбор статистики...")
-    
-    date_to = datetime.now()
-    date_from = date_to.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    stats = await get_stats_for_period(date_from, date_to)
-    
-    await msg.delete()
-    await message.answer(format_stats_message(stats, "СТАТИСТИКА ЗА СЕГОДНЯ"), parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-@dp.message(F.text == "📈 За вчера")
-async def stats_yesterday(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    
-    msg = await message.answer("📊 Сбор статистики...")
-    
-    date_to = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-    date_from = date_to
-    
-    stats = await get_stats_for_period(date_from, date_to)
-    
-    await msg.delete()
-    await message.answer(format_stats_message(stats, "СТАТИСТИКА ЗА ВЧЕРА"), parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-@dp.message(F.text == "📅 За неделю")
-async def stats_week(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    
-    msg = await message.answer("📊 Сбор статистики за неделю...")
-    
-    date_to = datetime.now()
-    date_from = date_to - timedelta(days=6)
-    
-    stats = await get_stats_for_period(date_from, date_to)
-    
-    await msg.delete()
-    await message.answer(format_stats_message(stats, "СТАТИСТИКА ЗА НЕДЕЛЮ"), parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-@dp.message(F.text == "📆 За месяц")
-async def stats_month(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    
-    msg = await message.answer("📊 Сбор статистики за месяц...")
-    
-    date_to = datetime.now()
-    date_from = date_to - timedelta(days=29)
-    
-    stats = await get_stats_for_period(date_from, date_to)
-    
-    await msg.delete()
-    await message.answer(format_stats_message(stats, "СТАТИСТИКА ЗА МЕСЯЦ"), parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-# ========== СВОЙ ПЕРИОД ==========
-@dp.message(F.text == "🎯 Свой период")
-async def custom_period_start(message: types.Message, state: FSMContext):
+# ========== ВЫБОР КЛУБА И ПЕРИОДА ==========
+@dp.message(F.text == "🏢 Выбрать клуб и период")
+async def select_club(message: types.Message, state: FSMContext):
     await message.answer(
-        "📅 Введите *дату начала* в формате:\n\n"
-        "`ГГГГ-ММ-ДД`\n\n"
-        "📌 *Пример:* `2026-06-01`",
+        "🏢 Введите *ID клуба* для анализа\n\n"
+        "• Нажмите «🏢 Список клубов» чтобы узнать ID\n"
+        "• Введите `0` для анализа по ВСЕМ клубам\n\n"
+        "📌 *Пример:* `1`",
         parse_mode="Markdown"
     )
-    await state.set_state(CustomPeriodState.waiting_date_from)
+    await state.set_state(SelectClubState.waiting_club_id)
 
-@dp.message(StateFilter(CustomPeriodState.waiting_date_from))
-async def custom_period_date_to(message: types.Message, state: FSMContext):
+@dp.message(StateFilter(SelectClubState.waiting_club_id))
+async def get_club_id(message: types.Message, state: FSMContext):
+    try:
+        club_id = int(message.text.strip())
+        await state.update_data(club_id=club_id if club_id != 0 else None)
+        
+        await message.answer(
+            "📅 *Выберите период анализа:*",
+            parse_mode="Markdown",
+            reply_markup=get_period_keyboard()
+        )
+        await state.set_state(SelectClubState.waiting_period_type)
+    except ValueError:
+        await message.answer("❌ Введите число (ID клуба)!")
+
+# ========== ОБРАБОТКА ВЫБОРА ПЕРИОДА ==========
+@dp.callback_query(StateFilter(SelectClubState.waiting_period_type))
+async def handle_period_selection(callback: types.CallbackQuery, state: FSMContext):
+    period_type = callback.data.replace("period_", "")
+    data = await state.get_data()
+    club_id = data.get("club_id")
+    
+    date_to = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    if period_type == "today":
+        date_from = date_to
+        title = "СТАТИСТИКА ЗА СЕГОДНЯ"
+        await process_stats(callback.message, club_id, date_from, date_to, title, state)
+    
+    elif period_type == "yesterday":
+        date_from = date_to - timedelta(days=1)
+        date_to = date_from
+        title = "СТАТИСТИКА ЗА ВЧЕРА"
+        await process_stats(callback.message, club_id, date_from, date_to, title, state)
+    
+    elif period_type == "week":
+        date_from = date_to - timedelta(days=6)
+        title = "СТАТИСТИКА ЗА НЕДЕЛЮ"
+        await process_stats(callback.message, club_id, date_from, date_to, title, state)
+    
+    elif period_type == "month":
+        date_from = date_to - timedelta(days=29)
+        title = "СТАТИСТИКА ЗА МЕСЯЦ"
+        await process_stats(callback.message, club_id, date_from, date_to, title, state)
+    
+    elif period_type == "custom":
+        await callback.message.answer(
+            "📅 Введите *дату начала* в формате:\n\n"
+            "`ГГГГ-ММ-ДД`\n\n"
+            "📌 *Пример:* `2026-06-01`",
+            parse_mode="Markdown"
+        )
+        await state.set_state(SelectClubState.waiting_custom_date_from)
+        await callback.answer()
+        return
+    
+    await callback.answer()
+
+async def process_stats(message: types.Message, club_id: int, date_from: datetime, date_to: datetime, title: str, state: FSMContext):
+    club_str = f" для клуба ID: {club_id}" if club_id else " для всех клубов"
+    msg = await message.answer(f"📊 Сбор статистики{club_str} за {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}...\n⏱️ Подождите...")
+    
+    stats = await get_stats_for_period(date_from, date_to, club_id)
+    
+    await msg.delete()
+    await message.answer(format_stats_message(stats, title), parse_mode="Markdown", reply_markup=get_main_keyboard())
+    
+    await state.update_data(last_stats=stats)
+
+# ========== СВОЙ ПЕРИОД ==========
+@dp.message(StateFilter(SelectClubState.waiting_custom_date_from))
+async def custom_date_from(message: types.Message, state: FSMContext):
     try:
         date_from = datetime.strptime(message.text.strip(), "%Y-%m-%d")
-        await state.update_data(date_from=date_from)
+        await state.update_data(custom_date_from=date_from)
         await message.answer(
             "📅 Введите *дату окончания* в формате:\n\n"
             "`ГГГГ-ММ-ДД`\n\n"
             "📌 *Пример:* `2026-06-30`",
             parse_mode="Markdown"
         )
-        await state.set_state(CustomPeriodState.waiting_date_to)
+        await state.set_state(SelectClubState.waiting_custom_date_to)
     except ValueError:
         await message.answer("❌ Неверный формат! Используйте: `ГГГГ-ММ-ДД`", parse_mode="Markdown")
 
-@dp.message(StateFilter(CustomPeriodState.waiting_date_to))
-async def custom_period_execute(message: types.Message, state: FSMContext):
+@dp.message(StateFilter(SelectClubState.waiting_custom_date_to))
+async def custom_date_to(message: types.Message, state: FSMContext):
     try:
         date_to = datetime.strptime(message.text.strip(), "%Y-%m-%d")
         data = await state.get_data()
-        date_from = data.get("date_from")
+        date_from = data.get("custom_date_from")
+        club_id = data.get("club_id")
         
         if date_from > date_to:
             await message.answer("❌ Дата начала не может быть позже даты окончания!")
-            await state.clear()
             return
         
-        # Добавляем время к датам
+        # Добавляем время
         date_from = date_from.replace(hour=0, minute=0)
         date_to = date_to.replace(hour=23, minute=59)
         
-        msg = await message.answer(f"📊 Сбор статистики за период {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}...\n⏱️ Подождите...")
+        club_str = f" для клуба ID: {club_id}" if club_id else " для всех клубов"
+        msg = await message.answer(f"📊 Сбор статистики{club_str} за {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}...\n⏱️ Подождите...")
         
-        stats = await get_stats_for_period(date_from, date_to)
+        stats = await get_stats_for_period(date_from, date_to, club_id)
         
         await msg.delete()
         await message.answer(format_stats_message(stats, "СТАТИСТИКА ЗА ПЕРИОД"), parse_mode="Markdown", reply_markup=get_main_keyboard())
@@ -460,64 +480,34 @@ async def custom_period_execute(message: types.Message, state: FSMContext):
 
 # ========== ТОП ТОВАРОВ ==========
 @dp.message(F.text == "🍔 Топ товаров")
-async def top_products(message: types.Message, state: FSMContext):
+async def top_products_select_club(message: types.Message, state: FSMContext):
     await message.answer(
-        "📅 Введите *дату начала* периода в формате:\n\n"
-        "`ГГГГ-ММ-ДД`\n\n"
-        "📌 *Пример:* `2026-06-01`",
+        "🏢 Введите *ID клуба* для анализа товаров\n\n"
+        "• Нажмите «🏢 Список клубов» чтобы узнать ID\n"
+        "• Введите `0` для всех клубов\n\n"
+        "📌 *Пример:* `1`",
         parse_mode="Markdown"
     )
-    await state.set_state(CustomPeriodState.waiting_date_from)
+    await state.set_state(SelectClubState.waiting_club_id)
     await state.update_data(mode="products")
 
-# Обработчик для товаров (переопределяем)
-@dp.message(StateFilter(CustomPeriodState.waiting_date_from))
-async def products_date_from(message: types.Message, state: FSMContext):
+# Переопределяем обработчик для товаров
+@dp.message(StateFilter(SelectClubState.waiting_club_id))
+async def get_club_id_for_products(message: types.Message, state: FSMContext):
     try:
-        date_from = datetime.strptime(message.text.strip(), "%Y-%m-%d")
-        await state.update_data(date_from=date_from)
+        club_id = int(message.text.strip())
+        mode = (await state.get_data()).get("mode", "stats")
+        await state.update_data(club_id=club_id if club_id != 0 else None, mode=mode)
+        
         await message.answer(
-            "📅 Введите *дату окончания* периода:\n\n"
+            "📅 Введите *дату начала* периода в формате:\n\n"
             "`ГГГГ-ММ-ДД`\n\n"
-            "📌 *Пример:* `2026-06-30`",
+            "📌 *Пример:* `2026-06-01`",
             parse_mode="Markdown"
         )
-        await state.set_state(CustomPeriodState.waiting_date_to)
+        await state.set_state(SelectClubState.waiting_custom_date_from)
     except ValueError:
-        await message.answer("❌ Неверный формат! Используйте: `ГГГГ-ММ-ДД`", parse_mode="Markdown")
-
-@dp.message(StateFilter(CustomPeriodState.waiting_date_to))
-async def products_execute(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    mode = data.get("mode", "stats")
-    
-    try:
-        date_to = datetime.strptime(message.text.strip(), "%Y-%m-%d")
-        date_from = data.get("date_from")
-        
-        if date_from > date_to:
-            await message.answer("❌ Дата начала не может быть позже даты окончания!")
-            await state.clear()
-            return
-        
-        date_from = date_from.replace(hour=0, minute=0)
-        date_to = date_to.replace(hour=23, minute=59)
-        
-        msg = await message.answer(f"🍔 Сбор данных о товарах за период {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}...")
-        
-        stats = await get_stats_for_period(date_from, date_to)
-        
-        await msg.delete()
-        
-        if mode == "products":
-            await message.answer(format_products_message(stats), parse_mode="Markdown", reply_markup=get_main_keyboard())
-        else:
-            await message.answer(format_stats_message(stats, "СТАТИСТИКА ЗА ПЕРИОД"), parse_mode="Markdown", reply_markup=get_main_keyboard())
-        
-    except ValueError:
-        await message.answer("❌ Неверный формат!", parse_mode="Markdown")
-    
-    await state.clear()
+        await message.answer("❌ Введите число (ID клуба)!")
 
 # ========== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ==========
 @dp.message()
@@ -525,10 +515,12 @@ async def unknown(message: types.Message):
     if not message.text.startswith("/"):
         await message.answer(
             "❓ Используйте кнопки меню\n\n"
-            "📊 *Доступные отчеты:*\n"
-            "• За сегодня/вчера/неделю/месяц\n"
-            "• Свой период\n"
-            "• Топ товаров",
+            "📊 *Как получить отчет:*\n"
+            "1. Нажмите «🏢 Список клубов» — узнайте ID\n"
+            "2. Нажмите «🏢 Выбрать клуб и период»\n"
+            "3. Введите ID клуба\n"
+            "4. Выберите период (сегодня/вчера/неделя/месяц/свой)\n\n"
+            "🍔 Для топ товаров — отдельная кнопка",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
