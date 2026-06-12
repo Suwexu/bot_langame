@@ -140,41 +140,57 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     unique_guests = set()
     club_name = "CyberX Краснодар Коммунаров"
     
-    # Список товаров, которые НЕ должны попадать в выручку (они уже в products/expense)
-    exclude_products = [
-        "Монстер", "Берн", "Импор", "Пиво", "Добрый", "Флеш", "Сникерс",
-        "Баунти", "Твикс", "Милка", "Лейс", "Принглс", "Кальян", "Липтон",
-        "Кола", "Спрайт", "Фанта", "Энергетик", "Чиабатта", "Кацу"
+    # Ключевые слова для определения продаж бара
+    bar_keywords = [
+        "бургер", "пицца", "кофе", "чай", "сок", "вода", "кола", "пепси", "спрайт",
+        "сэндвич", "наггетс", "картошка", "фрай", "кока-кола", "липтон", "фанта",
+        "энергетик", "смузи", "капучино", "латте", "американо", "флеш", "добрый",
+        "берн", "хрустальная", "сникерс", "баунти", "твикс", "милка", "лейс",
+        "принглс", "китКат", "орео", "кальян", "пиво", "монстер"
     ]
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
-        op_name = item.get("name", "")
-        op_name_lower = op_name.lower()
+        op_name = item.get("name", "").lower()
+        original_name = item.get("name", "")
+        op_source = item.get("source", "")
         club_name = item.get("club_name", club_name)
         
-        # Только реальные пополнения (без возвратов и без товаров)
-        is_valid_income = False
+        # 1. ПОПОЛНЕНИЯ (все, включая админ, МП, ЛК, исключая возвраты)
+        is_income = False
         if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
-            is_excluded = False
-            for product in exclude_products:
-                if product in op_name:
-                    is_excluded = True
-                    break
-            if "возврат" not in op_name_lower and not is_excluded:
-                is_valid_income = True
+            if "возврат" not in op_name:
+                is_income = True
         
-        if is_valid_income:
+        if is_income:
             total_income += op_sum
+            logger.debug(f"Пополнение: +{op_sum} ₽ | {original_name[:50]}")
         
-        # Подсчет сессий
-        if "сессия" in op_name_lower or "session" in op_name_lower:
+        # 2. ПРОДАЖИ БАРА (добавляем к выручке)
+        is_bar_sale = False
+        if (op_type == "Списание" or op_type == "minus") and op_sum > 0:
+            # Продажи через админку или терминал
+            if op_source in ["admin", "terminal"]:
+                is_bar_sale = True
+            # Или по ключевым словам
+            for keyword in bar_keywords:
+                if keyword in op_name:
+                    is_bar_sale = True
+                    break
+        
+        if is_bar_sale:
+            total_income += op_sum
+            logger.debug(f"Продажа бара: +{op_sum} ₽ | {original_name[:50]}")
+        
+        # 3. ПОДСЧЕТ СЕССИЙ
+        if "сессия" in op_name or "session" in op_name:
             sessions_count += 1
         
-        # Уникальные гости
-        if op_name and len(op_name) > 3:
-            unique_guests.add(op_name[:30])
+        # 4. УНИКАЛЬНЫЕ ГОСТИ
+        guest_name = item.get("name", "")
+        if guest_name and len(guest_name) > 3 and "пополнение" not in op_name:
+            unique_guests.add(guest_name[:30])
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
@@ -310,10 +326,10 @@ async def start(message: types.Message):
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
     await message.answer(
-        "🤖 *LANGAME АНАЛИТИКА v6.0*\n\n"
+        "🤖 *LANGAME АНАЛИТИКА v7.0*\n\n"
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
-        "• Анализ выручки за любой период\n"
+        "• Анализ выручки за любой период (пополнения + продажи бара)\n"
         "• Топ товаров (количество × цена)\n"
         "• Статистика сессий\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД",
