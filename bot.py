@@ -151,7 +151,7 @@ async def get_top_products(date_from: datetime, date_to: datetime) -> list:
     return top
 
 # ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ (ВЫРУЧКА, СЕССИИ) ==========
-async function get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
+async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     """Получение статистики из all_operations_log (выручка, сессии, гости)"""
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
