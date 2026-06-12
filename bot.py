@@ -43,18 +43,12 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 def safe_float(value: Any) -> float:
-    """Безопасное преобразование в float (работает с числами и строками)"""
     if value is None:
         return 0
     try:
         if isinstance(value, str):
-            # Очищаем строку от лишних символов
             cleaned = value.replace(',', '.').strip()
-            # Если строка пустая
-            if not cleaned:
-                return 0
-            # Пробуем преобразовать
-            return float(cleaned)
+            return float(cleaned) if cleaned else 0
         return float(value)
     except (ValueError, TypeError):
         return 0
@@ -108,6 +102,12 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     
     logger.info(f"Operations data count: {len(operations_data)}")
     
+    # ДЛЯ ОТЛАДКИ: выводим первые 3 операции с их типами
+    if operations_data:
+        logger.info("=== ПРИМЕРЫ ОПЕРАЦИЙ (для отладки) ===")
+        for i, item in enumerate(operations_data[:5]):
+            logger.info(f"Операция {i+1}: type='{item.get('type', 'НЕТ')}', name='{item.get('name', '')[:50]}', sum={item.get('sum', 0)}")
+    
     total_income = 0
     sessions_count = 0
     unique_guests = set()
@@ -127,15 +127,23 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     ]
     
     for item in operations_data:
-        # ВАЖНО: sum может быть строкой! Используем safe_float
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
         op_name = item.get("name", "").lower()
         original_name = item.get("name", "")
         club_name = item.get("club_name", club_name)
         
-        # Пополнения (выручка)
+        # Пробуем разные варианты определения пополнения
+        # ВАЖНО: в API может быть "plus" или "Пополнение"
+        is_income = False
         if op_type == "Пополнение" and op_sum > 0:
+            is_income = True
+        elif op_type == "plus" and op_sum > 0:
+            is_income = True
+        elif "пополнение" in op_name and op_sum > 0:
+            is_income = True
+        
+        if is_income:
             total_income += op_sum
         
         # Подсчет сессий
@@ -144,11 +152,11 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         
         # Уникальные гости
         guest_name = item.get("name", "")
-        if guest_name and len(guest_name) > 3 and op_type != "Пополнение":
+        if guest_name and len(guest_name) > 3 and not is_income:
             unique_guests.add(guest_name[:30])
         
-        # Подсчет продаж бара (по ключевым словам)
-        if op_type == "Списание" and op_sum > 0 and len(op_name) > 3:
+        # Подсчет продаж бара
+        if op_sum > 0 and len(op_name) > 3 and not is_income:
             is_product = False
             for keyword in food_keywords:
                 if keyword in op_name:
@@ -156,11 +164,8 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
                     break
             
             if is_product and original_name:
-                # Увеличиваем счетчик продаж
                 product_stats[original_name]["count"] += 1
-                # Суммируем выручку
                 product_stats[original_name]["total"] += op_sum
-                logger.debug(f"Товар: {original_name} - {op_sum} ₽ (всего продаж: {product_stats[original_name]['count']})")
     
     # Формируем топ товаров по общей выручке
     top_products = []
@@ -172,7 +177,6 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
             "avg_price": data["total"] / data["count"] if data["count"] > 0 else 0
         })
     
-    # Сортируем по общей выручке (total)
     top_products.sort(key=lambda x: x["total"], reverse=True)
     top_products = top_products[:15]
     
@@ -352,9 +356,16 @@ async def test_api(message: types.Message):
     
     if operations.get("status"):
         data_count = len(operations.get("data", []))
+        
+        # Показываем примеры типов операций
+        sample_types = set()
+        for item in operations.get("data", [])[:20]:
+            sample_types.add(item.get("type", "unknown"))
+        
         await message.answer(
             f"✅ *API РАБОТАЕТ!*\n\n"
-            f"📊 Найдено операций за 7 дней: {data_count}\n\n"
+            f"📊 Найдено операций за 7 дней: {data_count}\n"
+            f"📋 Типы операций в выборке: {', '.join(sample_types)}\n\n"
             f"Нажмите «📊 Выбрать период» для анализа",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
