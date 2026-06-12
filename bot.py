@@ -43,11 +43,20 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 def safe_float(value: Any) -> float:
+    """Безопасное преобразование в float (работает с числами и строками)"""
+    if value is None:
+        return 0
     try:
         if isinstance(value, str):
-            return float(value.replace(',', '.')) if value else 0
-        return float(value) if value else 0
-    except:
+            # Очищаем строку от лишних символов
+            cleaned = value.replace(',', '.').strip()
+            # Если строка пустая
+            if not cleaned:
+                return 0
+            # Пробуем преобразовать
+            return float(cleaned)
+        return float(value)
+    except (ValueError, TypeError):
         return 0
 
 # ========== API КЛИЕНТ ==========
@@ -103,7 +112,7 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     sessions_count = 0
     unique_guests = set()
     
-    # Структура: {название_товара: {"count": количество, "total": общая_сумма}}
+    # {название: {"count": количество_продаж, "total": общая_выручка}}
     product_stats = defaultdict(lambda: {"count": 0, "total": 0})
     
     club_name = "CyberX Краснодар Коммунаров"
@@ -114,11 +123,11 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         "сэндвич", "наггетс", "картошка", "фрай", "кока-кола", "липтон", "фанта",
         "энергетик", "смузи", "капучино", "латте", "американо", "флеш", "добрый",
         "берн", "хрустальная", "сникерс", "баунти", "твикс", "милка", "лейс",
-        "принглс", "киткат", "орео", "кальян", "пиво", "чиабатта", "кацу",
-        "чебупели", "чебупицца", "ходстеры"
+        "принглс", "китКат", "орео", "кальян", "пиво"
     ]
     
     for item in operations_data:
+        # ВАЖНО: sum может быть строкой! Используем safe_float
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
         op_name = item.get("name", "").lower()
@@ -147,11 +156,13 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
                     break
             
             if is_product and original_name:
+                # Увеличиваем счетчик продаж
                 product_stats[original_name]["count"] += 1
+                # Суммируем выручку
                 product_stats[original_name]["total"] += op_sum
-                logger.debug(f"Товар: {original_name} - {op_sum} ₽ (всего: {product_stats[original_name]['count']} шт.)")
+                logger.debug(f"Товар: {original_name} - {op_sum} ₽ (всего продаж: {product_stats[original_name]['count']})")
     
-    # Формируем топ товаров по общей выручке (count * сумма)
+    # Формируем топ товаров по общей выручке
     top_products = []
     for name, data in product_stats.items():
         top_products.append({
@@ -319,7 +330,7 @@ async def about(message: types.Message):
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
         "• Анализ выручки за любой период\n"
-        "• Топ товаров (с подсчетом количества продаж и общей выручки)\n"
+        "• Топ товаров (с подсчетом количества и общей выручки)\n"
         "• Статистика сессий\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД",
         parse_mode="Markdown",
