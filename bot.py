@@ -37,7 +37,6 @@ class PeriodState(StatesGroup):
     waiting_date_from = State()
     waiting_date_to = State()
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -65,10 +64,8 @@ class LangameAPI:
                     if resp.status == 200:
                         return await resp.json()
                     else:
-                        logger.error(f"HTTP {resp.status}: {url}")
                         return {"status": False, "error": f"HTTP {resp.status}"}
         except Exception as e:
-            logger.error(f"Ошибка: {e}")
             return {"status": False, "error": str(e)}
     
     async def get_clubs(self) -> Dict:
@@ -140,45 +137,62 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     unique_guests = set()
     club_name = "CyberX Краснодар Коммунаров"
     
-    # Список товаров, которые НЕ должны попадать в выручку
-    # (они уже учитываются в products/expense для топа, но не для выручки)
-    exclude_products = [
+    # Товары, которые исключаем из пополнений (но не из продаж)
+    exclude_from_deposits = [
         "Монстер", "Берн", "Импор", "Пиво", "Добрый", "Флеш", "Сникерс",
         "Баунти", "Твикс", "Милка", "Лейс", "Принглс", "Кальян", "Липтон",
-        "Кола", "Спрайт", "Фанта", "Энергетик", "Чиабатта", "Кацу", "Хот-дог"
+        "Кола", "Спрайт", "Фанта", "Энергетик", "Чиабатта", "Кацу"
     ]
+    
+    # Услуги, которые не должны попадать в продажи бара
+    service_keywords = ["сессия", "бронь", "абонемент", "подписка", "турнир"]
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
         op_name = item.get("name", "")
         op_name_lower = op_name.lower()
+        op_source = item.get("source", "")
         club_name = item.get("club_name", club_name)
         
-        # ТОЛЬКО РЕАЛЬНЫЕ ПОПОЛНЕНИЯ (без возвратов и без товаров)
-        is_valid_income = False
+        # 1. ПОПОЛНЕНИЯ (исключая возвраты и товары)
+        is_deposit = False
         if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
-            # Исключаем возвраты
             if "возврат" in op_name_lower:
                 continue
-            # Исключаем продажи товаров (они идут как plus, но это не пополнения)
             is_product = False
-            for product in exclude_products:
+            for product in exclude_from_deposits:
                 if product in op_name:
                     is_product = True
                     break
             if not is_product:
-                is_valid_income = True
+                is_deposit = True
         
-        if is_valid_income:
+        if is_deposit:
             total_income += op_sum
-            logger.debug(f"Пополнение: +{op_sum} ₽ | {op_name[:50]}")
         
-        # Подсчет сессий
+        # 2. ПРОДАЖИ БАРА (добавляем в выручку)
+        is_bar_sale = False
+        if (op_type == "Списание" or op_type == "minus") and op_sum > 0:
+            # Продажи через админку или терминал
+            if op_source in ["admin", "terminal"]:
+                # Проверяем, что это не услуга
+                is_service = False
+                for keyword in service_keywords:
+                    if keyword in op_name_lower:
+                        is_service = True
+                        break
+                if not is_service:
+                    is_bar_sale = True
+        
+        if is_bar_sale:
+            total_income += op_sum
+        
+        # 3. СЕССИИ
         if "сессия" in op_name_lower or "session" in op_name_lower:
             sessions_count += 1
         
-        # Уникальные гости
+        # 4. ГОСТИ
         if op_name and len(op_name) > 3 and "пополнение" not in op_name_lower:
             unique_guests.add(op_name[:30])
     
@@ -246,7 +260,6 @@ def format_full_report(stats: Dict, top_products: list) -> str:
     else:
         period_str = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
     
-    # Форматируем дату
     date_name = date_from.strftime("%A, %d %B %Y")
     weekdays = {
         "Monday": "Понедельник", "Tuesday": "Вторник", "Wednesday": "Среда",
@@ -316,10 +329,10 @@ async def start(message: types.Message):
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
     await message.answer(
-        "🤖 *LANGAME АНАЛИТИКА v7.0*\n\n"
+        "🤖 *LANGAME АНАЛИТИКА v8.0*\n\n"
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
-        "• Анализ выручки за любой период (только пополнения, без товаров)\n"
+        "• Анализ выручки за любой период (пополнения + продажи бара)\n"
         "• Топ товаров (количество × цена)\n"
         "• Статистика сессий\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД",
@@ -444,9 +457,7 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         if stats['total_income'] == 0 and not top_products:
             await message.answer(
                 f"⚠️ *Нет данных за период {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}*\n\n"
-                f"💡 *Возможные причины:*\n"
-                f"• В этот период не было операций\n"
-                f"• Попробуйте другой период",
+                f"💡 Попробуйте другой период",
                 parse_mode="Markdown",
                 reply_markup=get_main_keyboard()
             )
@@ -459,7 +470,6 @@ async def select_period_execute(message: types.Message, state: FSMContext):
     
     await state.clear()
 
-# ========== ОБРАБОТЧИК НЕИЗВЕСТНЫХ ==========
 @dp.message()
 async def unknown(message: types.Message):
     if not message.text.startswith("/"):
@@ -474,7 +484,6 @@ async def unknown(message: types.Message):
             reply_markup=get_main_keyboard()
         )
 
-# ========== ЗАПУСК ==========
 async def main():
     logger.info("🚀 LANGAME Аналитика бот запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
