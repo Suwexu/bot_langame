@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -18,11 +18,12 @@ load_dotenv()
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("LANGAME_API_KEY")
-API_BASE_URL = "https://cyberx302.langame.ru/public_api"
+API_BASE_URL = "https://cyberx302.langame.ru"  # ИСПРАВЛЕНО: убрано /public_api
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # Настройка логирования
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -57,7 +58,8 @@ class LangameAPI:
     
     async def request(self, endpoint: str, params: Dict = None, timeout: int = 90) -> Dict:
         """Универсальный метод для GET запросов с таймаутом"""
-        url = f"{self.base_url}{endpoint}"
+        # Формируем полный URL: base_url + /public_api + endpoint
+        url = f"{self.base_url}/public_api{endpoint}"
         logger.info(f"API Request: GET {url}")
         if params:
             logger.debug(f"Request params: {params}")
