@@ -137,16 +137,6 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     unique_guests = set()
     club_name = "CyberX Краснодар Коммунаров"
     
-    # Товары, которые исключаем из пополнений (но не из продаж)
-    exclude_from_deposits = [
-        "Монстер", "Берн", "Импор", "Пиво", "Добрый", "Флеш", "Сникерс",
-        "Баунти", "Твикс", "Милка", "Лейс", "Принглс", "Кальян", "Липтон",
-        "Кола", "Спрайт", "Фанта", "Энергетик", "Чиабатта", "Кацу"
-    ]
-    
-    # Услуги, которые не должны попадать в продажи бара
-    service_keywords = ["сессия", "бронь", "абонемент", "подписка", "турнир"]
-    
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
@@ -155,45 +145,35 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         op_source = item.get("source", "")
         club_name = item.get("club_name", club_name)
         
-        # 1. ПОПОЛНЕНИЯ (исключая возвраты и товары)
-        is_deposit = False
+        # ТОЛЬКО то, что в твоём файле:
+        # 1. Пополнения (админ) - source = "admin"
+        # 2. Пополнения (ЛК) - source = "cabinet" (ЛК гостя)
+        # 3. Продажи бара (админ) - source = "admin" и не "сессия"
+        
+        is_valid = False
+        
+        # Пополнения через админку или ЛК
         if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
-            if "возврат" in op_name_lower:
-                continue
-            is_product = False
-            for product in exclude_from_deposits:
-                if product in op_name:
-                    is_product = True
-                    break
-            if not is_product:
-                is_deposit = True
+            if op_source in ["admin", "cabinet"]:
+                if "возврат" not in op_name_lower:
+                    is_valid = True
         
-        if is_deposit:
-            total_income += op_sum
-        
-        # 2. ПРОДАЖИ БАРА (добавляем в выручку)
-        is_bar_sale = False
+        # Продажи бара через админку (не сессии)
         if (op_type == "Списание" or op_type == "minus") and op_sum > 0:
-            # Продажи через админку или терминал
-            if op_source in ["admin", "terminal"]:
-                # Проверяем, что это не услуга
-                is_service = False
-                for keyword in service_keywords:
-                    if keyword in op_name_lower:
-                        is_service = True
-                        break
-                if not is_service:
-                    is_bar_sale = True
+            if op_source == "admin":
+                if "сессия" not in op_name_lower and "бронь" not in op_name_lower:
+                    is_valid = True
         
-        if is_bar_sale:
+        if is_valid:
             total_income += op_sum
+            logger.debug(f"Добавлено: +{op_sum} ₽ | источник={op_source} | {op_name[:50]}")
         
-        # 3. СЕССИИ
+        # Сессии
         if "сессия" in op_name_lower or "session" in op_name_lower:
             sessions_count += 1
         
-        # 4. ГОСТИ
-        if op_name and len(op_name) > 3 and "пополнение" not in op_name_lower:
+        # Гости
+        if op_name and len(op_name) > 3:
             unique_guests.add(op_name[:30])
     
     days_count = max((date_to - date_from).days + 1, 1)
@@ -332,7 +312,7 @@ async def about(message: types.Message):
         "🤖 *LANGAME АНАЛИТИКА v8.0*\n\n"
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
-        "• Анализ выручки за любой период (пополнения + продажи бара)\n"
+        "• Анализ выручки за любой период (пополнения admin/cabinet + продажи бара admin)\n"
         "• Топ товаров (количество × цена)\n"
         "• Статистика сессий\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД",
