@@ -31,11 +31,6 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не указан!")
 
 # ========== СОСТОЯНИЯ ==========
-class BalanceState(StatesGroup):
-    waiting_phone = State()
-    waiting_amount = State()
-    waiting_comment = State()
-
 class SearchState(StatesGroup):
     waiting_input = State()
 
@@ -74,7 +69,7 @@ def is_admin(user_id: int) -> bool:
 
 def safe_str(value: Any) -> str:
     if value is None:
-        return "Нет данных"
+        return "—"
     return str(value)
 
 # ========== API КЛИЕНТ ==========
@@ -90,13 +85,20 @@ class LangameAPI:
             async with aiohttp.ClientSession() as session:
                 if method == "GET":
                     async with session.get(url, headers=self.headers, params=params, timeout=60) as resp:
-                        return await resp.json() if resp.status == 200 else {"status": False, "error": f"HTTP {resp.status}"}
+                        if resp.status == 200:
+                            return await resp.json()
+                        else:
+                            return {"status": False, "error": f"HTTP {resp.status}"}
                 else:
                     async with session.post(url, headers=self.headers, params=params, json=data, timeout=60) as resp:
-                        return await resp.json() if resp.status == 200 else {"status": False, "error": f"HTTP {resp.status}"}
+                        if resp.status == 200:
+                            return await resp.json()
+                        else:
+                            return {"status": False, "error": f"HTTP {resp.status}"}
         except Exception as e:
             return {"status": False, "error": str(e)}
     
+    # ========== ОСНОВНЫЕ МЕТОДЫ ==========
     async def test_api(self) -> Dict:
         return await self._request("/all_operations_log/list", params={"date_from": "2024-01-01", "date_to": "2024-01-02"})
     
@@ -114,10 +116,6 @@ class LangameAPI:
             payload["filter"] = {"ids": [int(query)]}
         else:
             payload["filter"] = {"query": query}
-        return await self._request("/guests/search", method="POST", data=payload)
-    
-    async def get_guest_by_phone(self, phone: str) -> Dict:
-        payload = {"filter": {"phone": phone}, "pagination": {"page": 1, "size": 1}}
         return await self._request("/guests/search", method="POST", data=payload)
     
     async def get_groups(self) -> Dict:
@@ -201,12 +199,6 @@ class LangameAPI:
     async def get_terminal(self) -> Dict:
         return await self._request("/ver/get_terminal")
     
-    async def update_balance(self, phone: str, amount: float, comment: str = None) -> Dict:
-        data = {"phone": phone, "type": "balance", "sum": amount}
-        if comment:
-            data["comment"] = comment
-        return await self._request("/guest/balance", method="POST", data=data)
-    
     async def manage_pc(self, command: str, pc_type: str = "free", uuids: list = None) -> Dict:
         data = {"command": command, "type": pc_type}
         if uuids:
@@ -232,7 +224,6 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="👨‍💼 Админы"), KeyboardButton(text="⚙️ Конфиг")],
         [KeyboardButton(text="📁 PUF"), KeyboardButton(text="🔌 Маршруты")],
         [KeyboardButton(text="📱 Админ ПО"), KeyboardButton(text="💻 Терминал")],
-        [KeyboardButton(text="💰 Пополнить"), KeyboardButton(text="💸 Списать")],
         [KeyboardButton(text="🖥️ Техстарт"), KeyboardButton(text="🔓 Разблокировка")],
         [KeyboardButton(text="🔒 Блокировка"), KeyboardButton(text="🔄 Ребут")],
         [KeyboardButton(text="🛑 Техстоп"), KeyboardButton(text="🔌 Вкл ПК")],
@@ -266,8 +257,10 @@ def format_result(data: Dict, title: str, fields: list) -> str:
     for item in items[:15]:
         for field in fields:
             value = item.get(field, "—")
-            if field in ["balance", "bonus_balance", "sum", "amount"] and isinstance(value, (int, float)):
+            if field in ["balance", "bonus_balance", "sum", "amount", "price"] and isinstance(value, (int, float)):
                 result += f"💰 {field}: {value:,.2f} ₽\n"
+            elif field == "count" and isinstance(value, (int, float)):
+                result += f"📦 {field}: {value} шт.\n"
             else:
                 result += f"📌 {field}: {safe_str(value)}\n"
         result += "─" * 25 + "\n"
@@ -356,7 +349,7 @@ async def test_api(message: types.Message):
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 LANGAME БОТ v3.0\n📍 Все команды API\n🔐 Для операций с балансом и ПК нужны права", reply_markup=get_main_keyboard())
+    await message.answer("🤖 LANGAME БОТ v3.0\n📍 Все команды API\n🔐 Для управления ПК нужны права", reply_markup=get_main_keyboard())
 
 # ========== ПРОСТЫЕ КОМАНДЫ ==========
 @dp.message(F.text == "🏢 Клубы")
@@ -704,71 +697,6 @@ async def expense_execute(message: types.Message, state: FSMContext):
         await message.answer(result, reply_markup=get_main_keyboard())
     else:
         await message.answer(f"❌ {r.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
-    await state.clear()
-
-# ========== УПРАВЛЕНИЕ БАЛАНСОМ ==========
-@dp.message(F.text == "💰 Пополнить")
-async def topup(message: types.Message, state: FSMContext):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    if not is_admin(message.from_user.id):
-        return await message.answer("⛔ Нет прав!")
-    await state.update_data(operation="topup")
-    await state.set_state(BalanceState.waiting_phone)
-    await message.answer("📱 Введите номер телефона гостя:")
-
-@dp.message(F.text == "💸 Списать")
-async def withdraw(message: types.Message, state: FSMContext):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    if not is_admin(message.from_user.id):
-        return await message.answer("⛔ Нет прав!")
-    await state.update_data(operation="withdraw")
-    await state.set_state(BalanceState.waiting_phone)
-    await message.answer("📱 Введите номер телефона гостя:")
-
-@dp.message(StateFilter(BalanceState.waiting_phone))
-async def balance_phone(message: types.Message, state: FSMContext):
-    phone = ''.join(filter(str.isdigit, message.text.strip()))
-    if len(phone) < 10:
-        await message.answer("❌ Неверный номер!")
-        return
-    msg = await message.answer("🔍 Поиск гостя...")
-    r = await api.get_guest_by_phone(phone)
-    await msg.delete()
-    if not r.get("items"):
-        await message.answer("❌ Гость не найден!")
-        await state.clear()
-        return
-    guest = r["items"][0]
-    await state.update_data(phone=phone, guest_name=guest.get('fio', '—'), guest_id=guest.get('guest_id'))
-    await state.set_state(BalanceState.waiting_amount)
-    await message.answer(f"👤 Гость: {guest.get('fio', '—')}\n💰 Введите сумму:")
-
-@dp.message(StateFilter(BalanceState.waiting_amount))
-async def balance_amount(message: types.Message, state: FSMContext):
-    try:
-        amount = float(message.text.replace(",", "."))
-        if amount <= 0:
-            raise ValueError
-    except:
-        await message.answer("❌ Введите положительное число!")
-        return
-    data = await state.get_data()
-    final = amount if data.get("operation") == "topup" else -amount
-    await state.update_data(amount=final)
-    await state.set_state(BalanceState.waiting_comment)
-    await message.answer(f"💰 Сумма: {final:+,.2f} ₽\n📝 Введите комментарий (или 'нет'):")
-
-@dp.message(StateFilter(BalanceState.waiting_comment))
-async def balance_comment(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    comment = None if message.text.lower() == "нет" else message.text
-    msg = await message.answer(f"🔄 Выполнение операции...")
-    r = await api.update_balance(data['phone'], data['amount'], comment)
-    await msg.delete()
-    if r.get("status"):
-        await message.answer(f"✅ {data.get('operation').upper()}\n👤 {data['guest_name']}\n💰 {data['amount']:+,.2f} ₽\n📝 {comment or '—'}", reply_markup=get_main_keyboard())
-    else:
-        await message.answer(f"❌ {r.get('error', 'Ошибка')}", reply_markup=get_main_keyboard())
     await state.clear()
 
 # ========== УПРАВЛЕНИЕ ПК ==========
