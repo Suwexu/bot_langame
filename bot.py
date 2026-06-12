@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, Optional
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -16,7 +16,6 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения
 load_dotenv()
 
 # ========== КОНФИГУРАЦИЯ ==========
@@ -25,7 +24,6 @@ API_KEY = os.getenv("LANGAME_API_KEY")
 API_BASE_URL = "https://cyberx302.langame.ru/public_api"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# Настройка логирования
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -34,9 +32,6 @@ logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не указан!")
-
-if not API_KEY:
-    logger.warning("LANGAME_API_KEY не указан!")
 
 # ========== СОСТОЯНИЯ ==========
 class GuestSearchState(StatesGroup):
@@ -60,18 +55,93 @@ class LangameAPI:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        self.connection_status = None
+        self.last_error = None
+    
+    async def test_connection(self) -> Dict:
+        """Тестирование подключения к API"""
+        logger.info("Testing API connection...")
+        
+        # Тест 1: Проверка доступности сервера
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.base_url}/v1/routes", timeout=10) as resp:
+                    logger.info(f"Server reachable, status: {resp.status}")
+        except Exception as e:
+            self.connection_status = False
+            self.last_error = f"Server unreachable: {e}"
+            return {"success": False, "error": self.last_error}
+        
+        # Тест 2: Проверка API ключа
+        if not self.api_key or self.api_key == "MISSING_API_KEY":
+            self.connection_status = False
+            self.last_error = "API key is missing"
+            return {"success": False, "error": "API ключ не настроен"}
+        
+        # Тест 3: Проверка авторизации
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.base_url}/v1/clubs/list",
+                    headers=self.headers,
+                    timeout=10
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("status"):
+                            self.connection_status = True
+                            self.last_error = None
+                            return {"success": True, "data": data}
+                        else:
+                            self.connection_status = False
+                            self.last_error = data.get("detail", "Unknown API error")
+                            return {"success": False, "error": self.last_error}
+                    elif resp.status == 403:
+                        self.connection_status = False
+                        self.last_error = "Invalid or missing API key (403 Forbidden)"
+                        return {"success": False, "error": "Неверный API ключ или нет доступа"}
+                    else:
+                        self.connection_status = False
+                        self.last_error = f"HTTP {resp.status}"
+                        return {"success": False, "error": f"Ошибка HTTP {resp.status}"}
+        except Exception as e:
+            self.connection_status = False
+            self.last_error = str(e)
+            return {"success": False, "error": str(e)}
     
     async def request(self, endpoint: str, method: str = "GET", data: Dict = None) -> Dict:
+        """Выполнение запроса к API"""
         url = f"{self.base_url}{endpoint}"
+        
+        logger.info(f"API Request: {method} {url}")
         
         async with aiohttp.ClientSession() as session:
             try:
                 if method.upper() == "GET":
                     async with session.get(url, headers=self.headers, params=data, timeout=30) as resp:
-                        return await resp.json()
+                        logger.info(f"Response status: {resp.status}")
+                        result = await resp.json()
+                        
+                        # Проверка HTTP статусов
+                        if resp.status == 403:
+                            return {"status": False, "error": "API key invalid or no access", "http_status": 403}
+                        elif resp.status == 400:
+                            return {"status": False, "error": "Invalid parameters", "http_status": 400}
+                        elif resp.status == 404:
+                            return {"status": False, "error": "Endpoint not found", "http_status": 404}
+                        
+                        return result
                 else:
                     async with session.post(url, headers=self.headers, json=data, timeout=30) as resp:
-                        return await resp.json()
+                        logger.info(f"Response status: {resp.status}")
+                        result = await resp.json()
+                        return result
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout on {endpoint}")
+                return {"status": False, "error": "Request timeout - server not responding"}
+            except aiohttp.ClientError as e:
+                logger.error(f"Client error: {e}")
+                return {"status": False, "error": f"Connection error: {str(e)}"}
             except Exception as e:
                 logger.error(f"API error: {e}")
                 return {"status": False, "error": str(e)}
@@ -81,6 +151,9 @@ class LangameAPI:
     
     async def get_balances(self, page: int = 1, limit: int = 20) -> Dict:
         return await self.request("/v1/guests/balance", data={"page": page, "page_limit": limit})
+    
+    async def get_bonus_balances(self, page: int = 1, limit: int = 20) -> Dict:
+        return await self.request("/v1/guests/bonus_balance", data={"page": page, "page_limit": limit})
     
     async def get_transactions(self, date_from: str, date_to: str, page: int = 1, limit: int = 20) -> Dict:
         return await self.request(
@@ -97,11 +170,12 @@ class LangameAPI:
             data={"guest_id": guest_id, "page": page, "page_limit": limit}
         )
 
-api = LangameAPI(API_KEY, API_BASE_URL)
+api = LangameAPI(API_KEY if API_KEY else "MISSING_API_KEY", API_BASE_URL)
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     buttons = [
+        [KeyboardButton(text="🔌 Проверить API")],
         [KeyboardButton(text="🏢 Клубы")],
         [KeyboardButton(text="💰 Балансы"), KeyboardButton(text="💸 Транзакции")],
         [KeyboardButton(text="👤 Поиск гостя"), KeyboardButton(text="🎮 Сессии")],
@@ -122,10 +196,12 @@ def get_search_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
-# ========== ФОРМАТТЕРЫ (без Markdown) ==========
+# ========== ФОРМАТТЕРЫ ==========
 def format_clubs(data: Dict) -> str:
     if not data.get("status"):
-        return "❌ Ошибка получения списка клубов"
+        error = data.get("error", "Unknown error")
+        http_status = data.get("http_status", "")
+        return f"❌ Ошибка API: {error}\n\n{http_status and f'HTTP Status: {http_status}' or ''}"
     
     clubs = data.get("data", [])
     if not clubs:
@@ -139,11 +215,19 @@ def format_clubs(data: Dict) -> str:
             result += f"   📍 {club.get('address')}\n"
         result += "\n"
     
+    if len(clubs) > 15:
+        result += f"\n📊 Всего клубов: {len(clubs)} (показано 15)"
+    else:
+        result += f"\n📊 Всего клубов: {len(clubs)}"
+    
     return result
 
 def format_balances(data: Dict) -> str:
     if not data.get("status"):
-        return "❌ Ошибка получения балансов.\n\nВозможные причины:\n• Неверный API ключ\n• Нет доступа к ресурсу"
+        error = data.get("error", "Unknown error")
+        if "API key" in error or "403" in str(data.get("http_status", "")):
+            return "❌ ОШИБКА АВТОРИЗАЦИИ\n\nПроверьте API ключ LANGAME_API_KEY в настройках Railway.\n\nВозможно, ключ неверный или у него нет доступа к этому методу."
+        return f"❌ Ошибка API: {error}"
     
     balances = data.get("data", [])
     if not balances:
@@ -154,18 +238,23 @@ def format_balances(data: Dict) -> str:
     for item in balances[:15]:
         balance = float(item.get('balance', 0))
         total += balance
-        result += f"• Гостя #{item.get('guest_id')}: {balance:,.2f} ₽\n"
+        result += f"• Гость #{item.get('guest_id')}: {balance:,.2f} ₽\n"
+    
+    if len(balances) > 15:
+        result += f"\n📊 Показано 15 из {len(balances)} записей"
+    else:
+        result += f"\n📊 Всего записей: {len(balances)}"
     
     result += f"\n💰 Общая сумма: {total:,.2f} ₽"
     return result
 
 def format_transactions(data: Dict) -> str:
     if not data.get("status"):
-        return "❌ Ошибка получения транзакций"
+        return f"❌ Ошибка API: {data.get('error', 'Unknown error')}"
     
     transactions = data.get("data", [])
     if not transactions:
-        return "📭 Транзакции не найдены"
+        return "📭 Транзакции не найдены за указанный период"
     
     result = "💸 ПОСЛЕДНИЕ ТРАНЗАКЦИИ\n\n"
     total = 0
@@ -193,12 +282,16 @@ async def cmd_start(message: types.Message):
 Я помогаю управлять игровым клубом через API LANGAME.
 
 📋 Доступные функции:
+• 🔌 Проверить API - тест подключения
 • 🏢 Список клубов
 • 💰 Балансы гостей
 • 💸 История транзакций
 • 👤 Поиск гостей
 • 🎮 Игровые сессии
 • 📊 Финансовая статистика
+
+🔧 ПЕРВЫЙ ШАГ:
+Нажмите кнопку "🔌 Проверить API" для диагностики подключения
 
 Используйте кнопки ниже 👇"""
     
@@ -209,6 +302,7 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     help_text = """❓ ПОМОЩЬ
 
+🔌 Проверить API - Тест подключения к API
 🏢 Клубы - Список всех клубов
 💰 Балансы - Денежные балансы гостей
 💸 Транзакции - История операций за 7 дней
@@ -216,10 +310,11 @@ async def cmd_help(message: types.Message):
 🎮 Сессии - История игровых сессий
 📊 Статистика - Финансовая аналитика
 
-🔧 Настройка API ключа:
+🔧 НАСТРОЙКА API:
 1. Зайдите в настройки Railway
 2. Добавьте переменную LANGAME_API_KEY
-3. Перезапустите бота"""
+3. Нажмите "🔌 Проверить API"
+4. Перезапустите бота"""
     
     await message.answer(help_text)
 
@@ -228,34 +323,77 @@ async def back_to_main(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("🏠 Главное меню", reply_markup=get_main_keyboard())
 
+@dp.message(F.text == "🔌 Проверить API")
+async def test_api_connection(message: types.Message):
+    """Проверка подключения к API"""
+    msg = await message.answer("🔄 Проверка подключения к API LANGAME...\n\nЭто может занять несколько секунд...")
+    
+    result = await api.test_connection()
+    
+    if result["success"]:
+        clubs_count = len(result.get("data", {}).get("data", []))
+        response_text = f"""✅ API ПОДКЛЮЧЕНИЕ УСПЕШНО!
+
+📊 Статус: Работает
+🔑 API Key: Настроен
+🏢 Доступно клубов: {clubs_count}
+🌐 API URL: {API_BASE_URL}
+
+🎉 Бот готов к работе! Используйте остальные кнопки меню."""
+    else:
+        response_text = f"""❌ ОШИБКА ПОДКЛЮЧЕНИЯ К API
+
+🔴 Статус: Не работает
+🔑 API Key: {'Не настроен' if not API_KEY else 'Настроен'}
+❌ Ошибка: {result['error']}
+
+💡 РЕШЕНИЕ:
+1. Проверьте переменную LANGAME_API_KEY в Railway
+2. Убедитесь, что ключ действителен
+3. Проверьте, что у ключа есть доступ к API методам
+4. После исправления нажмите "🔌 Проверить API" снова
+
+📝 Если ключа нет - обратитесь к администратору LANGAME"""
+    
+    await msg.edit_text(response_text)
+    logger.info(f"API test result for user {message.from_user.id}: {result['success']}")
+
 @dp.message(F.text == "ℹ️ О боте")
 async def about_bot(message: types.Message):
     api_status = "✅ Настроен" if API_KEY else "❌ Не настроен"
+    api_connected = "✅ Работает" if api.connection_status else "❌ Не проверено"
     
     about_text = f"""🤖 О БОТЕ LANGAME
 
-Версия: 1.1.0
+Версия: 1.2.0
 Платформа: Railway
 
-📌 Статус API: {api_status}
+📌 СТАТУС API:
+• Ключ: {api_status}
+• Соединение: {api_connected}
+• URL: {API_BASE_URL}
 
-🔧 API настройки:
-URL: {API_BASE_URL}
-Ключ: {api_status}
+💡 ПЕРВЫЙ ЗАПУСК:
+Нажмите кнопку "🔌 Проверить API"
 
-💡 Если функции не работают:
-1. Проверьте LANGAME_API_KEY в Railway
-2. Убедитесь, что ключ имеет доступ к API
-3. Перезапустите бота после добавления ключа"""
+⚠️ Если функции не работают:
+1. Нажмите "🔌 Проверить API"
+2. Следуйте инструкциям из результата проверки"""
     
     await message.answer(about_text)
     
     if not API_KEY:
-        await message.answer("⚠️ ВНИМАНИЕ! API ключ LANGAME не настроен.\n\nПожалуйста, добавьте переменную LANGAME_API_KEY в настройках Railway для работы всех функций.")
+        await message.answer("⚠️ ВНИМАНИЕ! API ключ LANGAME не настроен.\n\nНажмите кнопку '🔌 Проверить API' для получения инструкций.")
+    elif api.connection_status is None:
+        await message.answer("🔌 Нажмите кнопку 'Проверить API' для диагностики подключения.")
 
 @dp.message(F.text == "🏢 Клубы")
 async def show_clubs(message: types.Message):
     msg = await message.answer("🔄 Загрузка списка клубов...", reply_markup=get_back_keyboard())
+    
+    if not API_KEY:
+        await msg.edit_text("❌ API ключ не настроен!\n\nНажмите кнопку '🔌 Проверить API' для получения инструкций.")
+        return
     
     response = await api.get_clubs()
     result = format_clubs(response)
@@ -267,7 +405,7 @@ async def show_balances(message: types.Message):
     msg = await message.answer("🔄 Загрузка балансов гостей...", reply_markup=get_back_keyboard())
     
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!\n\nДобавьте переменную LANGAME_API_KEY в настройках Railway и перезапустите бота.")
+        await msg.edit_text("❌ API ключ не настроен!\n\nНажмите кнопку '🔌 Проверить API' для получения инструкций.")
         return
     
     response = await api.get_balances()
@@ -280,7 +418,7 @@ async def show_transactions(message: types.Message):
     msg = await message.answer("🔄 Загрузка транзакций за 7 дней...", reply_markup=get_back_keyboard())
     
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!\n\nДобавьте переменную LANGAME_API_KEY в настройках Railway и перезапустите бота.")
+        await msg.edit_text("❌ API ключ не настроен!\n\nНажмите кнопку '🔌 Проверить API' для получения инструкций.")
         return
     
     date_to = datetime.now().strftime("%Y-%m-%d")
@@ -294,7 +432,7 @@ async def show_transactions(message: types.Message):
 @dp.message(F.text == "👤 Поиск гостя")
 async def search_guest_prompt(message: types.Message):
     if not API_KEY:
-        await message.answer("❌ API ключ не настроен!\n\nДобавьте переменную LANGAME_API_KEY в настройках Railway и перезапустите бота.")
+        await message.answer("❌ API ключ не настроен!\n\nНажмите кнопку '🔌 Проверить API' для получения инструкций.")
         return
     
     await message.answer(
@@ -367,7 +505,7 @@ async def perform_search(message: types.Message, state: FSMContext):
 @dp.message(F.text == "🎮 Сессии")
 async def sessions_prompt(message: types.Message):
     if not API_KEY:
-        await message.answer("❌ API ключ не настроен!\n\nДобавьте переменную LANGAME_API_KEY в настройках Railway и перезапустите бота.")
+        await message.answer("❌ API ключ не настроен!\n\nНажмите кнопку '🔌 Проверить API' для получения инструкций.")
         return
     
     await message.answer(
@@ -407,14 +545,15 @@ async def show_sessions(message: types.Message, state: FSMContext):
         else:
             await msg.edit_text(f"📭 Сессии для гостя #{guest_id} не найдены")
     else:
-        await msg.edit_text(f"❌ Ошибка: {response.get('error', 'Не удалось получить сессии')}")
+        error = response.get('error', 'Не удалось получить сессии')
+        await msg.edit_text(f"❌ Ошибка: {error}")
     
     await state.clear()
 
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: types.Message):
     if not API_KEY:
-        await message.answer("❌ API ключ не настроен!\n\nДобавьте переменную LANGAME_API_KEY в настройках Railway и перезапустите бота.")
+        await message.answer("❌ API ключ не настроен!\n\nНажмите кнопку '🔌 Проверить API' для получения инструкций.")
         return
     
     msg = await message.answer("📊 Сбор статистики за 30 дней...")
@@ -440,22 +579,32 @@ async def show_stats(message: types.Message):
         
         await msg.edit_text(result)
     else:
-        await msg.edit_text(f"❌ Ошибка получения статистики")
+        await msg.edit_text(f"❌ Ошибка получения статистики: {response.get('error', 'Unknown error')}")
 
 @dp.message()
 async def handle_unknown(message: types.Message):
     if not message.text.startswith("/"):
         await message.answer(
-            "❓ Используйте кнопки меню или команду /help",
+            "❓ Используйте кнопки меню или команду /help\n\n🔧 Первым делом нажмите '🔌 Проверить API'",
             reply_markup=get_main_keyboard()
         )
 
 # ========== ЗАПУСК ==========
 async def main():
-    logger.info("🚀 Бот запускается...")
-    logger.info(f"API Key: {'Есть' if API_KEY else 'Нет'}")
+    logger.info("🚀 LANGAME Telegram Bot starting...")
+    logger.info(f"API URL: {API_BASE_URL}")
+    logger.info(f"API Key configured: {'YES' if API_KEY else 'NO'}")
     
     await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Автоматическая проверка API при старте
+    logger.info("Running automatic API connection test...")
+    test_result = await api.test_connection()
+    logger.info(f"Auto API test result: {test_result['success']}")
+    if not test_result['success']:
+        logger.warning(f"API test failed: {test_result['error']}")
+    
+    logger.info("Bot is ready!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
