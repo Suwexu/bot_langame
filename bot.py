@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-import re
 from datetime import datetime, timedelta
 from typing import Dict, Any
 from collections import defaultdict
@@ -50,14 +49,6 @@ def safe_float(value: Any) -> float:
         return float(value) if value else 0
     except:
         return 0
-
-def extract_price_from_name(name: str) -> float:
-    """Пытаемся извлечь цену из названия товара (если есть)"""
-    # Ищем числа в названии, которые могут быть ценой
-    match = re.search(r'(\d+)\s*руб', name.lower())
-    if match:
-        return float(match.group(1))
-    return 0
 
 # ========== API КЛИЕНТ ==========
 class LangameAPI:
@@ -112,8 +103,8 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     sessions_count = 0
     unique_guests = set()
     
-    # Структура для товаров: {название: {"count": количество, "total_sum": общая_сумма}}
-    product_stats = defaultdict(lambda: {"count": 0, "total_sum": 0, "last_price": 0})
+    # {название_товара: {"count": количество, "total": общая_сумма}}
+    products = defaultdict(lambda: {"count": 0, "total": 0})
     
     club_name = "CyberX Краснодар Коммунаров"
     
@@ -124,9 +115,7 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         "энергетик", "смузи", "капучино", "латте", "американо", "флеш", "добрый",
         "берн", "хрустальная", "сникерс", "баунти", "твикс", "милка", "лейс",
         "принглс", "киткат", "орео", "кальян", "пиво", "чиабатта", "кацу",
-        "чебупели", "чебупицца", "ходстеры", "козёл", "хадыженское", "старый мельник",
-        "клубника", "шоколад", "карамель", "фундук", "манго", "киви", "апельсин",
-        "лимон", "лайм", "банан", "яблоко", "дыня", "персик", "вишня", "малина"
+        "чебупели", "чебупицца", "ходстеры"
     ]
     
     for item in operations_data:
@@ -157,39 +146,35 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
                     is_product = True
                     break
             
-            if is_product:
-                # Используем оригинальное название как ключ (сохраняем вкусы)
-                product_name = original_name.strip()
-                if product_name:
-                    product_stats[product_name]["count"] += 1
-                    product_stats[product_name]["total_sum"] += op_sum
-                    product_stats[product_name]["last_price"] = op_sum
-                    logger.debug(f"Товар: {product_name} - {op_sum} ₽ (всего: {product_stats[product_name]['count']} шт.)")
+            if is_product and original_name:
+                products[original_name]["count"] += 1
+                products[original_name]["total"] += op_sum
+                logger.debug(f"Товар: {original_name} - {op_sum} ₽ (всего: {products[original_name]['count']} шт.)")
     
-    # Формируем топ товаров по общей выручке
+    # Формируем топ товаров по общей выручке (count * сумма)
     top_products = []
-    for name, stats in product_stats.items():
+    for name, data in products.items():
         top_products.append({
             "name": name,
-            "count": stats["count"],
-            "total_sum": stats["total_sum"],
-            "avg_price": stats["total_sum"] / stats["count"] if stats["count"] > 0 else 0
+            "count": data["count"],
+            "total": data["total"],
+            "avg_price": data["total"] / data["count"] if data["count"] > 0 else 0
         })
     
     # Сортируем по общей выручке
-    top_products.sort(key=lambda x: x["total_sum"], reverse=True)
+    top_products.sort(key=lambda x: x["total"], reverse=True)
     top_products = top_products[:15]
     
-    bar_revenue = sum(p["total_sum"] for p in top_products)
+    bar_revenue = sum(p["total"] for p in top_products)
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
     avg_daily = total_income / days_count if days_count > 0 else 0
     
     logger.info(f"ИТОГО: выручка={total_income}, продажи={bar_revenue}, сессии={sessions_count}")
-    logger.info(f"Найдено товаров: {len(product_stats)}")
+    logger.info(f"Найдено товаров: {len(products)}")
     for p in top_products[:5]:
-        logger.info(f"  {p['name']}: {p['count']} шт. x {p['avg_price']:.0f} ₽ = {p['total_sum']:.0f} ₽")
+        logger.info(f"  {p['name'][:30]}: {p['count']} шт. × {p['avg_price']:.0f} ₽ = {p['total']:.0f} ₽")
     
     return {
         "period_from": date_from,
@@ -244,7 +229,6 @@ def format_stats_message(stats: Dict, title: str) -> str:
 
 🏆 *Топ тарифов:*\n"""
     
-    # Топ тарифов - пока нет данных
     result += "• Нет данных\n"
     
     result += f"""
@@ -258,7 +242,7 @@ def format_stats_message(stats: Dict, title: str) -> str:
         for i, product in enumerate(stats['top_products'][:5], 1):
             name = product['name'][:35] + "..." if len(product['name']) > 35 else product['name']
             result += f"{i}. *{name}*\n"
-            result += f"   📦 {product['count']} шт. × {product['avg_price']:,.0f} ₽ = {product['total_sum']:,.0f} ₽\n\n"
+            result += f"   📦 {product['count']} шт. × {product['avg_price']:,.0f} ₽ = {product['total']:,.0f} ₽\n\n"
     else:
         result += "• Нет данных\n"
     
@@ -299,7 +283,7 @@ def format_simple_stats(stats: Dict, title: str) -> str:
         for i, product in enumerate(stats['top_products'][:8], 1):
             name = product['name'][:30] + "..." if len(product['name']) > 30 else product['name']
             result += f"{i}. {name}\n"
-            result += f"   📦 {product['count']} шт. × {product['avg_price']:,.0f} ₽ = {product['total_sum']:,.0f} ₽\n"
+            result += f"   📦 {product['count']} шт. × {product['avg_price']:,.0f} ₽ = {product['total']:,.0f} ₽\n"
     else:
         result += "• Нет данных\n"
     
