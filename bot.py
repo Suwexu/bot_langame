@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any
 from collections import defaultdict
 
@@ -11,9 +11,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton
-)
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -120,13 +118,12 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         if op_sum <= 0:
             continue
             
-        # 1. СТРОГИЙ ФИЛЬТР ВОЗВРАТОВ ДЕНЕГ КЛИЕНТАМ (уменьшают выручку)
+        # 1. Обработка возвратов денег клиентам
         if any(word in op_name_lower for word in ["возврат", "отмена", "cancel"]):
             total_income -= op_sum
             continue
 
-        # 2. ИСКЛЮЧЕНИЕ ТЕХНИЧЕСКИХ ОПЕРАЦИЙ И ВНУТРЕННЕГО ОБОРОТА
-        # Списания на ПК, инкассации кассы, статистика и корректировки пропускаются
+        # 2. Игнорируем внутренние технические списания / сессии / инкассации кассы
         if (
             "списание" in op_name_lower or 
             "инкассация" in op_name_lower or 
@@ -136,19 +133,20 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         ):
             continue
             
-        # 3. ВЫРУЧКА: Учитываем только операции из реальных внешних финансовых шлюзов кассы/ЛК/МП/MLM
-        # Это полностью решает проблему 10 июня (убирает 940₽ ложных пополнений) и 11 июня (добавляет 318₽ продаж)
+        # 3. Финансовый фильтр по реальным источникам денег
         valid_sources = ["admin", "cabinet", "mp", "app", "terminal", "mlm", "widget"]
-        if any(src in op_source for src in valid_sources) or op_type in ["Пополнение", "Продажа"]:
+        
+        # Если это пополнение через кассу/апп ИЛИ это прямая продажа товара мимо баланса
+        if (any(src in op_source for src in valid_sources) and op_type == "Пополнение") or op_type == "Продажа":
             total_income += op_sum
             
-        # Сбор сопутствующей статистики активности
+        # Сбор сопутствующей статистики
         if "сессия" in op_name_lower or "session" in op_name_lower or "списание баланса" in op_name_lower:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name_lower:
             unique_guests.add(op_name[:30])
 
-    # Подсчет статистики продаж по бару (для вывода блока топ-товаров)
+    # Сбор топ товаров
     top_products_dict = defaultdict(float)
     first_page = await api.get_products_expense(date_from_str, date_to_str, 1)
     total_pages = first_page.get("total_pages", 1)
@@ -231,11 +229,11 @@ def format_full_report(stats: Dict) -> str:
 # ========== ТЕЛЕГРАМ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот перезапущен и полностью готов к работе.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот успешно обновлен. Проверьте новые отчеты.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v14.0*\n\nВнедрен тотальный сквозной фильтр финансовых источников.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v15.0*\n\nИсправлена логика учета прямых продаж бара и фильтрация корректировок.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
