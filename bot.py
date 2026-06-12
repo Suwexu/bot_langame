@@ -124,7 +124,7 @@ async def get_top_products(date_from: datetime, date_to: datetime) -> list:
     
     return sorted(revenue.items(), key=lambda x: x[1], reverse=True)[:15]
 
-# ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ С ОТЛАДКОЙ ==========
+# ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
@@ -137,28 +137,8 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     unique_guests = set()
     club_name = "CyberX Краснодар Коммунаров"
     
-    # Счетчики для статистики
-    debug_stats = {
-        "deposits_admin": 0,
-        "deposits_cabinet": 0,
-        "deposits_other": 0,
-        "bar_sales_admin": 0,
-        "bar_sales_other": 0,
-        "excluded_refunds": 0,
-        "excluded_products": 0,
-        "excluded_services": 0,
-        "excluded_other": 0
-    }
-    
-    # Ключевые слова для определения товаров
-    product_keywords = [
-        "берн", "милка", "сникерс", "хрустальная", "пиво", "добрый", "флеш",
-        "баунти", "твикс", "лейс", "принглс", "кальян", "монстер", "импор"
-    ]
-    
-    print("\n" + "=" * 80)
-    print(f"📅 ПЕРИОД: {date_from_str} - {date_to_str}")
-    print("=" * 80)
+    # Ключевые слова для исключения услуг
+    service_keywords = ["сессия", "бронь", "абонемент", "подписка", "турнир"]
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
@@ -172,55 +152,26 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
             continue
         
         is_valid = False
-        reason = ""
         
-        # 1. ПОПОЛНЕНИЯ
+        # 1. ПОПОЛНЕНИЯ (админ и ЛК, исключая возвраты)
         if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
-            if "возврат" in op_name_lower:
-                reason = "возврат"
-                debug_stats["excluded_refunds"] += op_sum
-            elif op_source in ["admin", "cabinet"]:
-                is_product = False
-                for keyword in product_keywords:
-                    if keyword in op_name_lower:
-                        is_product = True
-                        break
-                if is_product:
-                    reason = f"товар в пополнении"
-                    debug_stats["excluded_products"] += op_sum
-                else:
+            if "возврат" not in op_name_lower:
+                if op_source in ["admin", "cabinet"]:
                     is_valid = True
-                    if op_source == "admin":
-                        debug_stats["deposits_admin"] += op_sum
-                    else:
-                        debug_stats["deposits_cabinet"] += op_sum
-            else:
-                reason = f"источник={op_source}"
-                debug_stats["deposits_other"] += op_sum
         
-        # 2. ПРОДАЖИ БАРА
+        # 2. ПРОДАЖИ БАРА (minus, admin, исключая услуги)
         elif (op_type == "Списание" or op_type == "minus") and op_sum > 0:
             if op_source == "admin":
-                if "сессия" in op_name_lower or "бронь" in op_name_lower:
-                    reason = f"услуга"
-                    debug_stats["excluded_services"] += op_sum
-                else:
+                is_service = False
+                for keyword in service_keywords:
+                    if keyword in op_name_lower:
+                        is_service = True
+                        break
+                if not is_service:
                     is_valid = True
-                    debug_stats["bar_sales_admin"] += op_sum
-            else:
-                reason = f"источник={op_source}"
-                debug_stats["bar_sales_other"] += op_sum
-        
-        else:
-            reason = f"тип={op_type}"
-            debug_stats["excluded_other"] += op_sum
         
         if is_valid:
             total_income += op_sum
-            print(f"✅ ДОБАВЛЕНО: +{op_sum:,.0f} ₽ | {op_type} | {op_source} | {op_name[:50]}")
-        else:
-            if op_sum > 0:
-                print(f"❌ ПРОПУЩЕНО: {op_sum:,.0f} ₽ | {op_type} | {op_source} | {op_name[:50]} | {reason}")
         
         # Сессии
         if "сессия" in op_name_lower:
@@ -229,25 +180,6 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         # Гости
         if op_name and len(op_name) > 3:
             unique_guests.add(op_name[:30])
-    
-    # ВЫВОДИМ ИТОГОВУЮ СТАТИСТИКУ
-    print("\n" + "=" * 80)
-    print("📊 ИТОГОВАЯ СТАТИСТИКА ОТБОРА:")
-    print("=" * 80)
-    print(f"💰 Пополнения (admin):        {debug_stats['deposits_admin']:,.0f} ₽")
-    print(f"💰 Пополнения (cabinet):      {debug_stats['deposits_cabinet']:,.0f} ₽")
-    print(f"💰 Пополнения (другие):       {debug_stats['deposits_other']:,.0f} ₽")
-    print(f"🍔 Продажи бара (admin):      {debug_stats['bar_sales_admin']:,.0f} ₽")
-    print(f"🍔 Продажи бара (другие):     {debug_stats['bar_sales_other']:,.0f} ₽")
-    print(f"❌ Исключено возвратов:       {debug_stats['excluded_refunds']:,.0f} ₽")
-    print(f"❌ Исключено товаров:         {debug_stats['excluded_products']:,.0f} ₽")
-    print(f"❌ Исключено услуг:           {debug_stats['excluded_services']:,.0f} ₽")
-    print(f"❌ Исключено прочих:          {debug_stats['excluded_other']:,.0f} ₽")
-    print("-" * 80)
-    print(f"🎯 ИТОГОВАЯ ВЫРУЧКА:          {total_income:,.0f} ₽")
-    print(f"🎮 Сессии:                    {sessions_count}")
-    print(f"👥 Уникальных гостей:         {len(unique_guests)}")
-    print("=" * 80 + "\n")
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
@@ -376,7 +308,7 @@ async def start(message: types.Message):
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
     await message.answer(
-        "🤖 *LANGAME АНАЛИТИКА v9.0*\n\n"
+        "🤖 *LANGAME АНАЛИТИКА v10.0*\n\n"
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
         "• Анализ выручки за любой период\n"
@@ -532,14 +464,11 @@ async def unknown(message: types.Message):
         )
 
 async def main():
-    print("\n" + "🚀" * 20)
-    print("🚀 LANGAME Аналитика бот запускается (режим отладки)...")
-    print("🚀" * 20 + "\n")
-    
+    logger.info("🚀 LANGAME Аналитика бот запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
     if API_KEY:
-        print("✅ API ключ настроен")
-    print("🎉 Бот готов!\n")
+        logger.info("✅ API ключ настроен")
+    logger.info("🎉 Бот готов!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
