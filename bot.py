@@ -7,7 +7,7 @@ from collections import defaultdict
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -45,6 +45,18 @@ def is_admin(user_id: int) -> bool:
     if not ALLOWED_USERS:
         return True
     return user_id in ALLOWED_USERS
+
+def safe_float(value: Any) -> float:
+    try:
+        return float(value) if value else 0
+    except:
+        return 0
+
+def safe_int(value: Any) -> int:
+    try:
+        return int(value) if value else 0
+    except:
+        return 0
 
 # ========== API КЛИЕНТ ==========
 class LangameAPI:
@@ -89,16 +101,6 @@ class LangameAPI:
     
     async def get_shifts(self, page: int = 1, limit: int = 50) -> Dict:
         return await self._request("/working_shifts/list", params={"page": page, "page_limit": limit})
-    
-    async def get_guests_count(self, date_from: str, date_to: str) -> Dict:
-        """Получение количества гостей через поиск"""
-        payload = {
-            "filter": {},
-            "pagination": {"page": 1, "size": 1},
-            "featues": {"fields": ["guest_id"]}
-        }
-        # Для подсчета нужно будет сделать несколько запросов, но API не возвращает total
-        return await self._request("/guests/search", method="POST", data=payload)
 
 api = LangameAPI(API_KEY if API_KEY else "")
 
@@ -109,212 +111,23 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="📈 Статистика за вчера")],
         [KeyboardButton(text="📅 Статистика за неделю")],
         [KeyboardButton(text="📆 Статистика за месяц")],
-        [KeyboardButton(text="🎯 Выбрать свой период")],
         [KeyboardButton(text="💰 Финансы"), KeyboardButton(text="🍔 Продажи бара")],
-        [KeyboardButton(text="🎮 Сессии"), KeyboardButton(text="👥 Новые гости")],
-        [KeyboardButton(text="🔄 Смены"), KeyboardButton(text="🏆 Топ тарифы")],
-        [KeyboardButton(text="🏢 Клубы"), KeyboardButton(text="📋 Лог операций")],
+        [KeyboardButton(text="🎮 Сессии"), KeyboardButton(text="🏆 Топ тарифы")],
+        [KeyboardButton(text="🔄 Смены"), KeyboardButton(text="🏢 Клубы")],
+        [KeyboardButton(text="📋 Лог операций"), KeyboardButton(text="👥 Новые гости")],
         [KeyboardButton(text="🔌 Проверить API"), KeyboardButton(text="ℹ️ О боте")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def get_period_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Сегодня", callback_data="period_today")],
-        [InlineKeyboardButton(text="📈 Вчера", callback_data="period_yesterday")],
-        [InlineKeyboardButton(text="📅 Неделя", callback_data="period_week")],
-        [InlineKeyboardButton(text="📆 Месяц", callback_data="period_month")],
-        [InlineKeyboardButton(text="🎯 Свой период", callback_data="period_custom")]
-    ])
-
-# ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ ==========
-def safe_float(value: Any) -> float:
-    try:
-        return float(value) if value else 0
-    except:
-        return 0
-
-def safe_int(value: Any) -> int:
-    try:
-        return int(value) if value else 0
-    except:
-        return 0
-
-def format_date(date_str: str) -> str:
-    if not date_str:
-        return "—"
-    return date_str[:16] if len(date_str) > 16 else date_str
-
-async def get_stats_for_period(period_days: int) -> Tuple[Dict, str]:
-    """Получение статистики за период"""
-    date_to = datetime.now()
-    date_from = date_to - timedelta(days=period_days)
-    
-    # Для вчера нужно смещение
-    if period_days == 1 and "yesterday" in str(period_days):
-        date_to = datetime.now() - timedelta(days=1)
-        date_from = date_to
-    
-    date_from_str = date_from.strftime("%Y-%m-%d")
-    date_to_str = date_to.strftime("%Y-%m-%d")
-    
-    # Получаем данные
-    operations = await api.get_operations(date_from_str, date_to_str)
-    transactions = await api.get_transactions(date_from_str, date_to_str)
-    products = await api.get_products_expense(date_from_str, date_to_str)
-    shifts = await api.get_shifts()
-    
-    # Анализируем операции
-    total_income = 0
-    total_expense = 0
-    sessions_count = 0
-    unique_guests = set()
-    new_guests = 0
-    product_sales = defaultdict(int)
-    tariff_count = defaultdict(int)
-    shift_data = {}
-    club_name = "CyberX Краснодар Коммунаров"
-    
-    # Обработка операций
-    if operations.get("status"):
-        for op in operations.get("data", []):
-            op_sum = safe_float(op.get("sum", 0))
-            op_type = op.get("type", "")
-            op_name = op.get("name", "")
-            
-            if op_type == "Пополнение":
-                total_income += op_sum
-            elif op_type == "Списание":
-                total_expense += abs(op_sum)
-            
-            # Подсчет сессий
-            if "сессия" in op_name.lower() or "session" in op_name.lower():
-                sessions_count += 1
-            
-            # Подсчет тарифов
-            if op_name:
-                tariff_count[op_name] += 1
-            
-            # Уникальные гости
-            guest_name = op.get("name", "")
-            if guest_name:
-                unique_guests.add(guest_name)
-    
-    # Обработка транзакций
-    avg_check = 0
-    if transactions.get("status"):
-        tx_data = transactions.get("data", [])
-        positive_tx = [t for t in tx_data if safe_float(t.get("balance", 0)) > 0]
-        if positive_tx:
-            total_checks = len(positive_tx)
-            total_sum = sum(safe_float(t.get("balance", 0)) for t in positive_tx)
-            avg_check = total_sum / total_checks if total_checks > 0 else 0
-    
-    # Обработка продаж товаров
-    bar_revenue = 0
-    top_products = []
-    if products.get("status"):
-        for prod in products.get("data", []):
-            price = safe_float(prod.get("price_sale", 0))
-            count = safe_int(prod.get("count", 0))
-            name = prod.get("name", "")
-            sale_sum = price * count
-            bar_revenue += sale_sum
-            if name:
-                product_sales[name] += sale_sum
-        
-        # Топ товаров
-        top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:5]
-    
-    # Обработка смен (возвраты)
-    shift_refunds = {}
-    if shifts.get("status"):
-        for shift in shifts.get("data", []):
-            admin_name = shift.get("user_name") or shift.get("admin_name") or "Неизвестно"
-            refunds = safe_float(shift.get("refunds_nal", 0)) + safe_float(shift.get("refunds_beznal", 0))
-            if admin_name not in shift_refunds:
-                shift_refunds[admin_name] = 0
-            shift_refunds[admin_name] += refunds
-    
-    # Топ тарифов
-    top_tariffs = sorted(tariff_count.items(), key=lambda x: x[1], reverse=True)[:3]
-    
-    # Сравнение со средними значениями (простая эвристика)
-    avg_weekday_income = total_income * 0.7  # приблизительно
-    income_diff = ((total_income - avg_weekday_income) / avg_weekday_income * 100) if avg_weekday_income > 0 else 0
-    
-    stats = {
-        "period": f"{date_from_str} - {date_to_str}",
-        "club_name": club_name,
-        "total_income": total_income,
-        "avg_check": avg_check,
-        "bar_revenue": bar_revenue,
-        "sessions_count": sessions_count,
-        "unique_guests": len(unique_guests),
-        "new_guests": 0,  # API не дает прямого способа подсчитать новых
-        "top_tariffs": top_tariffs,
-        "shift_refunds": shift_refunds,
-        "top_products": top_products,
-        "income_diff": income_diff,
-        "avg_weekday_income": avg_weekday_income,
-        "total_expense": total_expense
-    }
-    
-    return stats, date_from_str, date_to_str
-
-def format_stats_message(stats: Dict, period_name: str) -> str:
-    """Форматирование статистики в красивый вид"""
-    date = datetime.now().strftime("%A, %d %B %Y")
-    
-    # Перевод дней недели
+# ========== ФОРМАТИРОВАНИЕ ==========
+def format_date_ru(date_str: str) -> str:
     weekdays = {
         "Monday": "Понедельник", "Tuesday": "Вторник", "Wednesday": "Среда",
         "Thursday": "Четверг", "Friday": "Пятница", "Saturday": "Суббота", "Sunday": "Воскресенье"
     }
     for eng, rus in weekdays.items():
-        date = date.replace(eng, rus)
-    
-    msg = f"""📊 *RAW DATA {stats['club_name']}*
-{date}
-
-💰 *Финансы:*
-• Выручка: {stats['total_income']:,.0f} ₽
-• Средний чек: {stats['avg_check']:,.0f} ₽
-• Выручка бара: {stats['bar_revenue']:,.0f} ₽
-
-🎮 *Сессии:* {stats['sessions_count']} (гостей: {stats['unique_guests']}, новых: ~{stats['new_guests']})
-
-🏆 *Топ тарифов:*\n"""
-    
-    if stats['top_tariffs']:
-        for name, count in stats['top_tariffs'][:3]:
-            msg += f"• {name} ({count} раз)\n"
-    else:
-        msg += "• Нет данных\n"
-    
-    msg += f"\n🔄 *Смены и возвраты:*\n"
-    if stats['shift_refunds']:
-        for admin, refunds in stats['shift_refunds'].items():
-            msg += f"• {admin}: Возвраты {refunds:,.0f} ₽\n"
-    else:
-        msg += "• Нет данных\n"
-    
-    msg += f"\n🍔 *Топ товаров бара:*\n"
-    if stats['top_products']:
-        for name, amount in stats['top_products'][:3]:
-            msg += f"• {name} ({amount:,.0f} ₽)\n"
-    else:
-        msg += "• Нет данных\n"
-    
-    msg += f"""
-📈 *Аналитика:*
-• Выручка {stats['income_diff']:+.1f}% к среднему
-• Средний чек: {stats['avg_check']:,.0f} ₽
-• Всего операций: {stats['sessions_count']}
-
-#дайджест #ежедневный"""
-
-    return msg
+        date_str = date_str.replace(eng, rus)
+    return date_str
 
 # ========== ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
@@ -327,13 +140,11 @@ async def start(message: types.Message):
         "• 📈 Статистика за вчера\n"
         "• 📅 Статистика за неделю\n"
         "• 📆 Статистика за месяц\n"
-        "• 🎯 Выбрать свой период\n\n"
-        "📊 *Дополнительные отчеты:*\n"
-        "• 💰 Финансы - детальная финансовая аналитика\n"
-        "• 🍔 Продажи бара - топ товаров\n"
-        "• 🎮 Сессии - статистика по сессиям\n"
-        "• 👥 Новые гости - анализ прироста\n"
-        "• 🏆 Топ тарифы - популярность тарифов\n\n"
+        "• 💰 Финансовый отчет\n"
+        "• 🍔 Продажи бара\n"
+        "• 🎮 Статистика сессий\n"
+        "• 🏆 Топ тарифов\n"
+        "• 🔄 Отчет по сменам\n\n"
         "Используйте кнопки ниже 👇",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
@@ -351,7 +162,8 @@ async def about(message: types.Message):
         "• Кассовые смены\n\n"
         "📅 *Периоды:* день, неделя, месяц\n\n"
         "🔐 *Доступ:* только для авторизованных администраторов",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard()
     )
 
 @dp.message(F.text == "🔌 Проверить API")
@@ -370,41 +182,21 @@ async def test_api(message: types.Message):
     else:
         await message.answer(f"❌ Ошибка API: {result.get('error', 'Неизвестная ошибка')}", reply_markup=get_main_keyboard())
 
-# ========== ОСНОВНАЯ СТАТИСТИКА ==========
+# ========== СТАТИСТИКА ЗА СЕГОДНЯ ==========
 @dp.message(F.text == "📊 Статистика за сегодня")
 async def stats_today(message: types.Message):
     if not API_KEY:
         await message.answer("❌ API ключ не настроен!")
         return
     
-    msg = await message.answer("📊 Сбор статистики за сегодня...\n⏱️ Подождите, это может занять до 30 секунд...")
+    msg = await message.answer("📊 Сбор статистики за сегодня...\n⏱️ Подождите...")
     
     try:
-        stats, _, _ = await get_stats_for_period(1)
-        stats['new_guests'] = int(stats['unique_guests'] * 0.24)  # примерная оценка
-        
-        result = format_stats_message(stats, "сегодня")
-        await msg.delete()
-        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
-    except Exception as e:
-        await msg.delete()
-        await message.answer(f"❌ Ошибка при сборе статистики: {str(e)}", reply_markup=get_main_keyboard())
-
-@dp.message(F.text == "📈 Статистика за вчера")
-async def stats_yesterday(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    
-    msg = await message.answer("📊 Сбор статистики за вчера...\n⏱️ Подождите, это может занять до 30 секунд...")
-    
-    try:
-        date_to = datetime.now() - timedelta(days=1)
-        date_from = date_to
+        date_to = datetime.now()
+        date_from = date_to.replace(hour=0, minute=0, second=0, microsecond=0)
         date_from_str = date_from.strftime("%Y-%m-%d")
         date_to_str = date_to.strftime("%Y-%m-%d")
         
-        # Получаем данные
         operations = await api.get_operations(date_from_str, date_to_str)
         transactions = await api.get_transactions(date_from_str, date_to_str)
         products = await api.get_products_expense(date_from_str, date_to_str)
@@ -415,8 +207,7 @@ async def stats_yesterday(message: types.Message):
         unique_guests = set()
         product_sales = defaultdict(int)
         tariff_count = defaultdict(int)
-        shift_refunds = {}
-        club_name = "CyberX Краснодар Коммунаров"
+        shift_refunds = defaultdict(int)
         
         if operations.get("status"):
             for op in operations.get("data", []):
@@ -432,10 +223,6 @@ async def stats_yesterday(message: types.Message):
                 
                 if op_name:
                     tariff_count[op_name] += 1
-                
-                guest_name = op.get("name", "")
-                if guest_name:
-                    unique_guests.add(guest_name)
         
         avg_check = 0
         if transactions.get("status"):
@@ -462,17 +249,14 @@ async def stats_yesterday(message: types.Message):
             for shift in shifts.get("data", []):
                 admin_name = shift.get("user_name") or shift.get("admin_name") or "Неизвестно"
                 refunds = safe_float(shift.get("refunds_nal", 0)) + safe_float(shift.get("refunds_beznal", 0))
-                shift_refunds[admin_name] = shift_refunds.get(admin_name, 0) + refunds
+                shift_refunds[admin_name] += refunds
         
         top_tariffs = sorted(tariff_count.items(), key=lambda x: x[1], reverse=True)[:3]
         
-        date_name = date_to.strftime("%A, %d %B %Y")
-        weekdays = {"Monday": "Понедельник", "Tuesday": "Вторник", "Wednesday": "Среда",
-                    "Thursday": "Четверг", "Friday": "Пятница", "Saturday": "Суббота", "Sunday": "Воскресенье"}
-        for eng, rus in weekdays.items():
-            date_name = date_name.replace(eng, rus)
+        date_name = date_from.strftime("%A, %d %B %Y")
+        date_name = format_date_ru(date_name)
         
-        result = f"""📊 *RAW DATA {club_name}*
+        result = f"""📊 *RAW DATA CyberX Краснодар Коммунаров*
 {date_name}
 
 💰 *Финансы:*
@@ -483,6 +267,7 @@ async def stats_yesterday(message: types.Message):
 🎮 *Сессии:* {sessions_count} (гостей: {len(unique_guests)})
 
 🏆 *Топ тарифов:*\n"""
+        
         if top_tariffs:
             for name, count in top_tariffs:
                 result += f"• {name} ({count} раз)\n"
@@ -512,13 +297,128 @@ async def stats_yesterday(message: types.Message):
         await msg.delete()
         await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
+# ========== СТАТИСТИКА ЗА ВЧЕРА ==========
+@dp.message(F.text == "📈 Статистика за вчера")
+async def stats_yesterday(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    
+    msg = await message.answer("📊 Сбор статистики за вчера...\n⏱️ Подождите...")
+    
+    try:
+        date_to = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        date_from = date_to
+        date_from_str = date_from.strftime("%Y-%m-%d")
+        date_to_str = date_to.strftime("%Y-%m-%d")
+        
+        operations = await api.get_operations(date_from_str, date_to_str)
+        transactions = await api.get_transactions(date_from_str, date_to_str)
+        products = await api.get_products_expense(date_from_str, date_to_str)
+        shifts = await api.get_shifts()
+        
+        total_income = 0
+        sessions_count = 0
+        product_sales = defaultdict(int)
+        tariff_count = defaultdict(int)
+        shift_refunds = defaultdict(int)
+        
+        if operations.get("status"):
+            for op in operations.get("data", []):
+                op_sum = safe_float(op.get("sum", 0))
+                op_type = op.get("type", "")
+                op_name = op.get("name", "")
+                
+                if op_type == "Пополнение":
+                    total_income += op_sum
+                
+                if "сессия" in op_name.lower():
+                    sessions_count += 1
+                
+                if op_name:
+                    tariff_count[op_name] += 1
+        
+        avg_check = 0
+        if transactions.get("status"):
+            tx_data = transactions.get("data", [])
+            positive_tx = [t for t in tx_data if safe_float(t.get("balance", 0)) > 0]
+            if positive_tx:
+                total_sum = sum(safe_float(t.get("balance", 0)) for t in positive_tx)
+                avg_check = total_sum / len(positive_tx) if positive_tx else 0
+        
+        bar_revenue = 0
+        top_products = []
+        if products.get("status"):
+            for prod in products.get("data", []):
+                price = safe_float(prod.get("price_sale", 0))
+                count = safe_int(prod.get("count", 0))
+                name = prod.get("name", "")
+                sale_sum = price * count
+                bar_revenue += sale_sum
+                if name:
+                    product_sales[name] += sale_sum
+            top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        if shifts.get("status"):
+            for shift in shifts.get("data", []):
+                admin_name = shift.get("user_name") or shift.get("admin_name") or "Неизвестно"
+                refunds = safe_float(shift.get("refunds_nal", 0)) + safe_float(shift.get("refunds_beznal", 0))
+                shift_refunds[admin_name] += refunds
+        
+        top_tariffs = sorted(tariff_count.items(), key=lambda x: x[1], reverse=True)[:3]
+        
+        date_name = date_from.strftime("%A, %d %B %Y")
+        date_name = format_date_ru(date_name)
+        
+        result = f"""📊 *RAW DATA CyberX Краснодар Коммунаров*
+{date_name}
+
+💰 *Финансы:*
+• Выручка: {total_income:,.0f} ₽
+• Средний чек: {avg_check:,.0f} ₽
+• Выручка бара: {bar_revenue:,.0f} ₽
+
+🎮 *Сессии:* {sessions_count}
+
+🏆 *Топ тарифов:*\n"""
+        
+        if top_tariffs:
+            for name, count in top_tariffs:
+                result += f"• {name} ({count} раз)\n"
+        else:
+            result += "• Нет данных\n"
+        
+        result += f"\n🔄 *Смены и возвраты:*\n"
+        if shift_refunds:
+            for admin, refunds in shift_refunds.items():
+                result += f"• {admin}: Возвраты {refunds:,.0f} ₽\n"
+        else:
+            result += "• Нет данных\n"
+        
+        result += f"\n🍔 *Топ товаров бара:*\n"
+        if top_products:
+            for name, amount in top_products[:3]:
+                result += f"• {name} ({amount:,.0f} ₽)\n"
+        else:
+            result += "• Нет данных\n"
+        
+        result += f"\n#дайджест #ежедневный"
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
+
+# ========== СТАТИСТИКА ЗА НЕДЕЛЮ ==========
 @dp.message(F.text == "📅 Статистика за неделю")
 async def stats_week(message: types.Message):
     if not API_KEY:
         await message.answer("❌ API ключ не настроен!")
         return
     
-    msg = await message.answer("📊 Сбор статистики за неделю...\n⏱️ Это может занять до 60 секунд...")
+    msg = await message.answer("📊 Сбор статистики за неделю...\n⏱️ Подождите...")
     
     try:
         date_to = datetime.now()
@@ -530,13 +430,12 @@ async def stats_week(message: types.Message):
         
         total_income = 0
         sessions_count = 0
-        product_sales = defaultdict(int)
+        bar_revenue = 0
         
         if operations.get("status"):
             for op in operations.get("data", []):
-                op_sum = safe_float(op.get("sum", 0))
                 if op.get("type") == "Пополнение":
-                    total_income += op_sum
+                    total_income += safe_float(op.get("sum", 0))
                 if "сессия" in op.get("name", "").lower():
                     sessions_count += 1
         
@@ -548,13 +447,11 @@ async def stats_week(message: types.Message):
                 total_sum = sum(safe_float(t.get("balance", 0)) for t in positive_tx)
                 avg_check = total_sum / len(positive_tx) if positive_tx else 0
         
-        bar_revenue = 0
         if products.get("status"):
             for prod in products.get("data", []):
                 price = safe_float(prod.get("price_sale", 0))
                 count = safe_int(prod.get("count", 0))
-                sale_sum = price * count
-                bar_revenue += sale_sum
+                bar_revenue += price * count
         
         result = f"""📊 *СТАТИСТИКА ЗА НЕДЕЛЮ*
 
@@ -567,11 +464,11 @@ async def stats_week(message: types.Message):
 
 🎮 *Сессии:* {sessions_count}
 
-📈 *Динамика:*\n"""
-        
-        if sessions_count > 0:
-            result += f"• Средняя выручка в день: {total_income/7:,.0f} ₽\n"
-        result += f"• Среднее кол-во сессий в день: {sessions_count/7:.0f}\n"
+📈 *Динамика:*
+• Средняя выручка в день: {total_income/7:,.0f} ₽
+• Среднее кол-во сессий в день: {sessions_count/7:.0f}
+
+#неделя #отчет"""
         
         await msg.delete()
         await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
@@ -580,13 +477,14 @@ async def stats_week(message: types.Message):
         await msg.delete()
         await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
+# ========== СТАТИСТИКА ЗА МЕСЯЦ ==========
 @dp.message(F.text == "📆 Статистика за месяц")
 async def stats_month(message: types.Message):
     if not API_KEY:
         await message.answer("❌ API ключ не настроен!")
         return
     
-    msg = await message.answer("📊 Сбор статистики за месяц...\n⏱️ Это может занять до 90 секунд...")
+    msg = await message.answer("📊 Сбор статистики за месяц...\n⏱️ Подождите...")
     
     try:
         date_to = datetime.now()
@@ -597,9 +495,8 @@ async def stats_month(message: types.Message):
         total_income = 0
         if operations.get("status"):
             for op in operations.get("data", []):
-                op_sum = safe_float(op.get("sum", 0))
                 if op.get("type") == "Пополнение":
-                    total_income += op_sum
+                    total_income += safe_float(op.get("sum", 0))
         
         result = f"""📊 *СТАТИСТИКА ЗА МЕСЯЦ*
 
@@ -620,7 +517,7 @@ async def stats_month(message: types.Message):
         await msg.delete()
         await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
-# ========== ДОПОЛНИТЕЛЬНЫЕ ОТЧЕТЫ ==========
+# ========== ФИНАНСОВЫЙ ОТЧЕТ ==========
 @dp.message(F.text == "💰 Финансы")
 async def finance_report(message: types.Message):
     if not API_KEY:
@@ -671,6 +568,7 @@ async def finance_report(message: types.Message):
         await msg.delete()
         await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
+# ========== ПРОДАЖИ БАРА ==========
 @dp.message(F.text == "🍔 Продажи бара")
 async def bar_sales(message: types.Message):
     if not API_KEY:
@@ -721,6 +619,7 @@ async def bar_sales(message: types.Message):
         await msg.delete()
         await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
+# ========== СТАТИСТИКА СЕССИЙ ==========
 @dp.message(F.text == "🎮 Сессии")
 async def sessions_report(message: types.Message):
     if not API_KEY:
@@ -761,6 +660,7 @@ async def sessions_report(message: types.Message):
         await msg.delete()
         await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
+# ========== ТОП ТАРИФОВ ==========
 @dp.message(F.text == "🏆 Топ тарифы")
 async def top_tariffs(message: types.Message):
     if not API_KEY:
@@ -809,6 +709,7 @@ async def top_tariffs(message: types.Message):
         await msg.delete()
         await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
+# ========== СМЕНЫ ==========
 @dp.message(F.text == "🔄 Смены")
 async def shifts_report(message: types.Message):
     if not API_KEY:
@@ -848,6 +749,7 @@ async def shifts_report(message: types.Message):
         await msg.delete()
         await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
+# ========== КЛУБЫ ==========
 @dp.message(F.text == "🏢 Клубы")
 async def clubs(message: types.Message):
     if not API_KEY:
@@ -870,6 +772,7 @@ async def clubs(message: types.Message):
     else:
         await message.answer(f"❌ {r.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
 
+# ========== ЛОГ ОПЕРАЦИЙ ==========
 @dp.message(F.text == "📋 Лог операций")
 async def operations_log(message: types.Message):
     if not API_KEY:
@@ -899,6 +802,7 @@ async def operations_log(message: types.Message):
     else:
         await message.answer(f"❌ {r.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
 
+# ========== НОВЫЕ ГОСТИ ==========
 @dp.message(F.text == "👥 Новые гости")
 async def new_guests(message: types.Message):
     await message.answer(
@@ -909,55 +813,11 @@ async def new_guests(message: types.Message):
         "• Динамика прироста\n"
         "• Активность новых гостей\n"
         "• Конверсия в постоянных",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard()
     )
 
-@dp.message(F.text == "🎯 Выбрать свой период")
-async def custom_period(message: types.Message, state: FSMContext):
-    await message.answer("📅 Введите начальную дату (ГГГГ-ММ-ДД):")
-    await state.set_state(StatsState.waiting_date_from)
-
-@dp.message(StateFilter(StatsState.waiting_date_from))
-async def custom_period_date_to(message: types.Message, state: FSMContext):
-    await state.update_data(date_from=message.text.strip())
-    await message.answer("📅 Введите конечную дату (ГГГГ-ММ-ДД):")
-    await state.set_state(StatsState.waiting_date_to)
-
-@dp.message(StateFilter(StatsState.waiting_date_to))
-async def custom_period_execute(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    date_from = data.get("date_from")
-    date_to = message.text.strip()
-    
-    msg = await message.answer(f"📊 Сбор статистики за период {date_from} - {date_to}...\n⏱️ Подождите...")
-    
-    try:
-        operations = await api.get_operations(date_from, date_to)
-        
-        total_income = 0
-        if operations.get("status"):
-            for op in operations.get("data", []):
-                if op.get("type") == "Пополнение":
-                    total_income += safe_float(op.get("sum", 0))
-        
-        result = f"""📊 *СТАТИСТИКА ЗА ПЕРИОД*
-
-📅 {date_from} - {date_to}
-
-💰 *Общая выручка:* {total_income:,.0f} ₽
-📈 *Средняя выручка в день:* {total_income / max(1, (datetime.strptime(date_to, "%Y-%m-%d") - datetime.strptime(date_from, "%Y-%m-%d")).days):,.0f} ₽
-
-#custom #report"""
-        
-        await msg.delete()
-        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
-        
-    except Exception as e:
-        await msg.delete()
-        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
-    
-    await state.clear()
-
+# ========== ОБРАБОТЧИК НЕИЗВЕСТНЫХ ==========
 @dp.message()
 async def unknown(message: types.Message):
     if not message.text.startswith("/"):
