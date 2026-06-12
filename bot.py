@@ -1,218 +1,136 @@
-import os
-import asyncio
-import logging
-from datetime import datetime
 
-import aiohttp
-from aiogram import Bot, Dispatcher
-from aiogram.filters import Command
-from aiogram.types import Message
+# ДОБАВИТЬ В КЛАСС LangameAPI
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_KEY = os.getenv("LANGAME_API_KEY")
+async def get_products(self) -> Dict:
+    return await self._request("/products/list")
 
-API_BASE_URL = "https://cyberx302.langame.ru/public_api"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-logger = logging.getLogger(__name__)
-
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
+async def get_products_expense(self, date_from: str, date_to: str, page: int = 1) -> Dict:
+    params = {
+        "date_from": date_from,
+        "date_to": date_to,
+        "page": page
+    }
+    return await self._request("/products/expense", params=params)
 
 
-class LangameAPI:
+# ПОЛНОСТЬЮ ЗАМЕНИТЬ get_stats_for_period НА ЭТУ ВЕРСИЮ
 
-    def __init__(self, api_key):
-        self.api_key = api_key
+async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
+    date_from_str = date_from.strftime("%Y-%m-%d")
+    date_to_str = date_to.strftime("%Y-%m-%d")
 
-    async def request(self, endpoint, params=None):
+    operations = await api.get_operations(date_from_str, date_to_str)
+    operations_data = operations.get("data", []) if operations.get("status") else []
 
-        headers = {
-            "X-Request-Token": self.api_key,
-            "Content-Type": "application/json"
-        }
+    total_income = 0
+    sessions_count = 0
+    unique_guests = set()
+    club_name = "CyberX"
 
-        url = f"{API_BASE_URL}{endpoint}"
+    for item in operations_data:
+        op_sum = safe_float(item.get("sum", 0))
+        op_type = item.get("type", "")
+        op_name = str(item.get("name", "")).lower()
 
-        async with aiohttp.ClientSession() as session:
+        club_name = item.get("club_name", club_name)
 
-            async with session.get(
-                url,
-                headers=headers,
-                params=params
-            ) as response:
+        if op_type == "Пополнение" and op_sum > 0:
+            total_income += op_sum
 
-                logger.info(f"URL: {response.url}")
-                logger.info(f"STATUS: {response.status}")
+        if "сессия" in op_name or "session" in op_name:
+            sessions_count += 1
 
-                try:
-                    return await response.json()
-                except:
-                    return {"error": await response.text()}
+        guest_name = item.get("name", "")
+        if guest_name:
+            unique_guests.add(guest_name)
 
-    async def get_products_list(self):
-        return await self.request("/products/list")
-
-    async def get_products_expense(self, date_from, date_to, page=1):
-
-        return await self.request(
-            "/products/expense",
-            {
-                "date_from": date_from,
-                "date_to": date_to,
-                "page": page
-            }
-        )
-
-
-api = LangameAPI(API_KEY)
-
-
-@dp.message(Command("debug"))
-async def debug(message: Message):
-
-    await message.answer("Начинаю проверку...")
-
-    date_from = "2026-06-01"
-    date_to = "2026-06-30"
-
-    logger.info("=" * 100)
-    logger.info("STEP 1 - PRODUCTS LIST")
-    logger.info("=" * 100)
-
-    goods = await api.get_products_list()
-
-    logger.info(goods)
+    products = await api.get_products()
 
     goods_map = {}
+    if products.get("status"):
+        for product in products.get("data", []):
+            goods_map[product["id"]] = product["name"]
 
-    if goods.get("status"):
+    sales_by_product = {}
 
-        for item in goods.get("data", []):
-
-            goods_map[item["id"]] = item["name"]
-
-    logger.info(f"GOODS COUNT: {len(goods_map)}")
-
-    logger.info("=" * 100)
-    logger.info("STEP 2 - PRODUCTS EXPENSE PAGE 1")
-    logger.info("=" * 100)
-
-    sales = await api.get_products_expense(
-        date_from,
-        date_to,
-        1
+    first_page = await api.get_products_expense(
+        date_from_str,
+        date_to_str,
+        page=1
     )
 
-    logger.info(sales)
-
-    if not sales.get("status"):
-
-        await message.answer("products/expense вернул ошибку")
-
-        return
-
-    logger.info(
-        f"TOTAL PAGES: {sales.get('total_pages')}"
-    )
-
-    logger.info(
-        f"FIRST PAGE ITEMS: {len(sales.get('data', []))}"
-    )
+    total_pages = first_page.get("total_pages", 1)
 
     all_sales = []
 
-    total_pages = sales.get("total_pages", 1)
-
     for page in range(1, total_pages + 1):
-
-        logger.info(f"LOADING PAGE {page}")
-
-        page_data = await api.get_products_expense(
-            date_from,
-            date_to,
-            page
+        response = await api.get_products_expense(
+            date_from_str,
+            date_to_str,
+            page=page
         )
 
-        if page_data.get("status"):
+        if not response.get("status"):
+            continue
 
-            all_sales.extend(
-                page_data.get("data", [])
-            )
-
-    logger.info(
-        f"TOTAL SALES RECORDS: {len(all_sales)}"
-    )
-
-    product_revenue = {}
+        all_sales.extend(response.get("data", []))
 
     for sale in all_sales:
 
-        if sale.get("cancel") == 1:
+        if sale.get("cancel", 0) == 1:
             continue
 
         goods_id = sale.get("list_goods_id")
 
-        name = goods_map.get(
+        if not goods_id:
+            continue
+
+        product_name = goods_map.get(
             goods_id,
-            f"UNKNOWN_{goods_id}"
+            f"Товар #{goods_id}"
         )
 
-        count = float(
-            sale.get("count", 0)
-        )
+        count = safe_float(sale.get("count", 1))
+        price_sale = safe_float(sale.get("price_sale", 0))
 
-        price = float(
-            sale.get("price_sale", 0)
-        )
+        revenue = count * price_sale
 
-        revenue = count * price
+        if product_name not in sales_by_product:
+            sales_by_product[product_name] = 0
 
-        product_revenue[name] = (
-            product_revenue.get(name, 0)
-            + revenue
-        )
+        sales_by_product[product_name] += revenue
 
-    top = sorted(
-        product_revenue.items(),
+    top_products = sorted(
+        sales_by_product.items(),
         key=lambda x: x[1],
         reverse=True
-    )[:20]
+    )[:10]
 
-    logger.info("=" * 100)
-    logger.info("TOP PRODUCTS")
-    logger.info("=" * 100)
+    bar_revenue = sum(sales_by_product.values())
 
-    for i, item in enumerate(top, start=1):
+    days_count = max((date_to - date_from).days + 1, 1)
 
-        logger.info(
-            f"{i}. {item[0]} = {item[1]}"
-        )
-
-    logger.info("=" * 100)
-
-    await message.answer(
-        f"Готово.\n"
-        f"Товаров: {len(goods_map)}\n"
-        f"Продаж: {len(all_sales)}\n"
-        f"Смотри логи Railway."
+    avg_check = (
+        total_income / sessions_count
+        if sessions_count > 0 else 0
     )
 
-
-async def main():
-
-    logger.info("DEBUG BOT STARTED")
-
-    await bot.delete_webhook(
-        drop_pending_updates=True
+    avg_daily = (
+        total_income / days_count
+        if days_count > 0 else 0
     )
 
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    return {
+        "period_from": date_from,
+        "period_to": date_to,
+        "days_count": days_count,
+        "total_income": total_income,
+        "avg_check": avg_check,
+        "bar_revenue": bar_revenue,
+        "sessions_count": sessions_count,
+        "unique_guests": len(unique_guests),
+        "top_products": top_products,
+        "raw_operations": len(operations_data),
+        "club_name": club_name,
+        "avg_daily": avg_daily
+    }
