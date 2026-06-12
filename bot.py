@@ -151,7 +151,7 @@ async def get_top_products(date_from: datetime, date_to: datetime) -> list:
     return top
 
 # ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ (ВЫРУЧКА, СЕССИИ) ==========
-async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
+async function get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     """Получение статистики из all_operations_log (выручка, сессии, гости)"""
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
@@ -162,48 +162,87 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     logger.info(f"Найдено операций: {len(operations_data)}")
     
     total_income = 0
+    total_refund = 0
     sessions_count = 0
     unique_guests = set()
     club_name = "CyberX Краснодар Коммунаров"
+    
+    # Детализация по типам операций
+    income_by_type = defaultdict(float)
+    refund_by_type = defaultdict(float)
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
         op_name = item.get("name", "").lower()
+        original_name = item.get("name", "")
+        op_source = item.get("source", "")
         club_name = item.get("club_name", club_name)
         
-        # ПОПОЛНЕНИЯ (ВЫРУЧКА) - поддерживаем оба формата: "Пополнение" и "plus"
+        # ПОПОЛНЕНИЯ (ВЫРУЧКА) - поддерживаем все форматы
         is_income = False
+        
         if op_type == "Пополнение" and op_sum > 0:
             is_income = True
+            income_by_type["Пополнение"] += op_sum
         elif op_type == "plus" and op_sum > 0:
             is_income = True
+            income_by_type["plus"] += op_sum
         elif "пополнение" in op_name and op_sum > 0:
             is_income = True
+            income_by_type["название_содержит_пополнение"] += op_sum
         
         if is_income:
             total_income += op_sum
-            logger.debug(f"Пополнение: +{op_sum} ₽")
+            logger.debug(f"Пополнение: +{op_sum} ₽ | тип={op_type} | источник={op_source} | название={original_name[:50]}")
         
-        # Подсчет сессий
-        if "сессия" in op_name or "session" in op_name:
+        # ВОЗВРАТЫ
+        if "возврат" in op_name or "refund" in op_name:
+            refund_amount = abs(op_sum)
+            total_refund += refund_amount
+            refund_by_type[op_type] += refund_amount
+            logger.debug(f"Возврат: {refund_amount} ₽ | тип={op_type} | название={original_name[:50]}")
+        
+        # ПОДСЧЕТ СЕССИЙ
+        if "сессия" in op_name or "session" in op_name or "запуск" in op_name:
             sessions_count += 1
         
-        # Уникальные гости
+        # УНИКАЛЬНЫЕ ГОСТИ
         guest_name = item.get("name", "")
-        if guest_name and len(guest_name) > 3 and not is_income:
+        if guest_name and len(guest_name) > 3 and not is_income and "возврат" not in op_name:
             unique_guests.add(guest_name[:30])
+    
+    # Итоговая выручка (с учетом возвратов)
+    net_income = total_income - total_refund
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
-    avg_daily = total_income / days_count if days_count > 0 else 0
+    avg_daily = net_income / days_count if days_count > 0 else 0
     
-    logger.info(f"ВЫРУЧКА: {total_income:.0f} ₽")
-    logger.info(f"СЕССИИ: {sessions_count}")
-    logger.info(f"ГОСТИ: {len(unique_guests)}")
+    # ВЫВОДИМ ДЕТАЛЬНЫЙ ОТЧЕТ В ЛОГ
+    logger.info("=" * 60)
+    logger.info("📊 ДЕТАЛИЗАЦИЯ ВЫРУЧКИ:")
+    logger.info(f"  Пополнения (тип 'Пополнение'): {income_by_type.get('Пополнение', 0):,.0f} ₽")
+    logger.info(f"  Пополнения (тип 'plus'): {income_by_type.get('plus', 0):,.0f} ₽")
+    logger.info(f"  Пополнения (по названию): {income_by_type.get('название_содержит_пополнение', 0):,.0f} ₽")
+    logger.info(f"  ➕ Общая сумма пополнений: {total_income:,.0f} ₽")
+    logger.info(f"")
+    logger.info(f"  Возвраты (тип 'minus'): {refund_by_type.get('minus', 0):,.0f} ₽")
+    logger.info(f"  Возвраты (тип 'Списание'): {refund_by_type.get('Списание', 0):,.0f} ₽")
+    logger.info(f"  ➖ Общая сумма возвратов: {total_refund:,.0f} ₽")
+    logger.info(f"")
+    logger.info(f"  ✅ ИТОГОВАЯ ВЫРУЧКА: {net_income:,.0f} ₽")
+    logger.info(f"")
+    logger.info(f"  Сессии: {sessions_count}")
+    logger.info(f"  Гости: {len(unique_guests)}")
+    logger.info("=" * 60)
     
     return {
-        "total_income": total_income,
+        "total_income": net_income,
+        "total_income_gross": total_income,
+        "total_refund": total_refund,
+        "income_by_type": dict(income_by_type),
+        "refund_by_type": dict(refund_by_type),
         "avg_check": avg_check,
         "sessions_count": sessions_count,
         "unique_guests": len(unique_guests),
@@ -344,7 +383,6 @@ async def test_api(message: types.Message):
         return
     msg = await message.answer("🔄 Проверка подключения...")
     
-    # Проверяем доступ к products/expense
     date_to = datetime.now().strftime("%Y-%m-%d")
     date_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     
