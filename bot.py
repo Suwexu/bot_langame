@@ -37,7 +37,6 @@ class PeriodState(StatesGroup):
     waiting_date_from = State()
     waiting_date_to = State()
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -65,10 +64,8 @@ class LangameAPI:
                     if resp.status == 200:
                         return await resp.json()
                     else:
-                        logger.error(f"HTTP {resp.status}: {url}")
                         return {"status": False, "error": f"HTTP {resp.status}"}
         except Exception as e:
-            logger.error(f"Ошибка: {e}")
             return {"status": False, "error": str(e)}
     
     async def get_clubs(self) -> Dict:
@@ -125,8 +122,7 @@ async def get_top_products(date_from: datetime, date_to: datetime) -> list:
             price = safe_float(sale.get("price_sale", 0))
             revenue[name] += count * price
     
-    top = sorted(revenue.items(), key=lambda x: x[1], reverse=True)[:15]
-    return top
+    return sorted(revenue.items(), key=lambda x: x[1], reverse=True)[:15]
 
 # ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
@@ -136,52 +132,48 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     operations = await api.get_operations(date_from_str, date_to_str)
     operations_data = operations.get("data", []) if operations.get("status") else []
     
-    total_income = 0
-    sessions_count = 0
-    unique_guests = set()
-    club_name = "CyberX Краснодар Коммунаров"
+    # 1. СЧИТАЕМ ПОПОЛНЕНИЯ (исключаем только возвраты, товары НЕ исключаем)
+    total_income_from_operations = 0
     all_income_operations = []
     
-    # Ключевые слова для исключения из пополнений
-    exclude_keywords = [
-        "возврат", "refund", "берн", "монстер", "флеш", "добрый", "сникерс", 
-        "баунти", "твикс", "милка", "лейс", "принглс", "пиво", "кальян",
-        "импор", "козёл", "хадыженское", "старый мельник", "липтон", "кола"
-    ]
+    exclude_keywords = ["возврат", "refund"]
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
         op_name = item.get("name", "").lower()
         original_name = item.get("name", "")
-        op_source = item.get("source", "")
-        club_name = item.get("club_name", club_name)
         
-        # Реальные пополнения (исключаем возвраты и продажи товаров)
-        is_real_income = False
+        # Пополнения (исключаем только возвраты)
         if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
             is_excluded = False
             for keyword in exclude_keywords:
                 if keyword in op_name:
                     is_excluded = True
                     break
-            if "возврат" in op_name:
-                is_excluded = True
             if not is_excluded:
-                is_real_income = True
-        
-        if is_real_income:
-            total_income += op_sum
-            all_income_operations.append({
-                "sum": op_sum,
-                "name": original_name[:50]
-            })
-        
-        # Сессии
+                total_income_from_operations += op_sum
+                all_income_operations.append({
+                    "sum": op_sum,
+                    "name": original_name[:50]
+                })
+    
+    # 2. СЧИТАЕМ ПРОДАЖИ ТОВАРОВ
+    top_products = await get_top_products(date_from, date_to)
+    total_products_revenue = sum(amount for _, amount in top_products)
+    
+    # 3. ИТОГОВАЯ ВЫРУЧКА = пополнения + продажи товаров
+    total_income = total_income_from_operations + total_products_revenue
+    
+    # 4. СЕССИИ И ГОСТИ
+    sessions_count = 0
+    unique_guests = set()
+    club_name = "CyberX Краснодар Коммунаров"
+    
+    for item in operations_data:
+        op_name = item.get("name", "").lower()
         if "сессия" in op_name or "session" in op_name:
             sessions_count += 1
-        
-        # Гости
         guest_name = item.get("name", "")
         if guest_name and len(guest_name) > 3:
             unique_guests.add(guest_name[:30])
@@ -190,16 +182,19 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
     avg_daily = total_income / days_count if days_count > 0 else 0
     
+    # ЛОГИ ДЛЯ ОТЛАДКИ
     logger.info("=" * 60)
-    logger.info(f"📊 Реальных пополнений: {len(all_income_operations)}")
+    logger.info(f"📊 Пополнения (без возвратов): {total_income_from_operations:,.0f} ₽")
+    logger.info(f"📊 Продажи товаров: {total_products_revenue:,.0f} ₽")
     logger.info(f"✅ ИТОГОВАЯ ВЫРУЧКА: {total_income:,.0f} ₽")
-    logger.info(f"📋 СПИСОК ПОПОЛНЕНИЙ:")
-    for inc in all_income_operations:
-        logger.info(f"  +{inc['sum']:,.0f} ₽ | {inc['name']}")
+    logger.info(f"🎮 Сессии: {sessions_count}")
+    logger.info(f"👥 Гости: {len(unique_guests)}")
     logger.info("=" * 60)
     
     return {
         "total_income": total_income,
+        "total_income_from_operations": total_income_from_operations,
+        "total_products_revenue": total_products_revenue,
         "avg_check": avg_check,
         "sessions_count": sessions_count,
         "unique_guests": len(unique_guests),
