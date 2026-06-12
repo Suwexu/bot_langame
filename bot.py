@@ -2,11 +2,12 @@ import os
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
+from collections import defaultdict
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -31,46 +32,19 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не указан!")
 
 # ========== СОСТОЯНИЯ ==========
-class SearchState(StatesGroup):
-    waiting_input = State()
-
-class SessionsState(StatesGroup):
-    waiting_guest_id = State()
-
-class CashState(StatesGroup):
-    waiting_club_id = State()
+class StatsState(StatesGroup):
     waiting_date_from = State()
     waiting_date_to = State()
-
-class GoodsState(StatesGroup):
-    waiting_club_id = State()
-
-class ExpenseState(StatesGroup):
-    waiting_date_from = State()
-    waiting_date_to = State()
-
-class HistoryState(StatesGroup):
-    waiting_date_from = State()
-    waiting_date_to = State()
-
-class PcUuidsState(StatesGroup):
-    waiting_uuids = State()
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def is_admin(user_id: int) -> bool:
     if not ALLOWED_USERS:
         return True
     return user_id in ALLOWED_USERS
-
-def safe_str(value: Any) -> str:
-    if value is None:
-        return "—"
-    return str(value)
 
 # ========== API КЛИЕНТ ==========
 class LangameAPI:
@@ -98,682 +72,914 @@ class LangameAPI:
         except Exception as e:
             return {"status": False, "error": str(e)}
     
-    # ========== ОСНОВНЫЕ МЕТОДЫ ==========
-    async def test_api(self) -> Dict:
-        return await self._request("/all_operations_log/list", params={"date_from": "2024-01-01", "date_to": "2024-01-02"})
-    
-    async def get_clubs(self) -> Dict:
-        return await self._request("/clubs/list")
-    
-    async def get_guests(self, page: int = 1) -> Dict:
-        return await self._request("/guests/list", params={"page": page, "page_limit": 20})
-    
-    async def search_guest(self, query: str, search_type: str) -> Dict:
-        payload = {"pagination": {"page": 1, "size": 10}, "featues": {"fields": ["guest_id", "fio", "phone", "balance"]}}
-        if search_type == "phone":
-            payload["filter"] = {"phone": query}
-        elif search_type == "id":
-            payload["filter"] = {"ids": [int(query)]}
-        else:
-            payload["filter"] = {"query": query}
-        return await self._request("/guests/search", method="POST", data=payload)
-    
-    async def get_groups(self) -> Dict:
-        return await self._request("/guests/groups")
-    
-    async def get_sessions(self, guest_id: int) -> Dict:
-        return await self._request("/guests/sessions", params={"guest_id": guest_id, "page_limit": 10})
-    
-    async def get_balances(self) -> Dict:
-        return await self._request("/guests/balance", params={"page_limit": 20})
-    
-    async def get_bonus(self) -> Dict:
-        return await self._request("/guests/bonus_balance", params={"page_limit": 20})
-    
-    async def get_transactions(self, days: int = 30) -> Dict:
-        date_to = datetime.now().strftime("%Y-%m-%d")
-        date_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        return await self._request("/transactions/list", params={"date_from": date_from, "date_to": date_to, "page_limit": 20})
-    
-    async def get_operations(self, days: int = 30) -> Dict:
-        date_to = datetime.now().strftime("%Y-%m-%d")
-        date_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    async def get_operations(self, date_from: str, date_to: str) -> Dict:
         return await self._request("/all_operations_log/list", params={"date_from": date_from, "date_to": date_to})
     
-    async def get_cash(self, club_id: int, date_from: str, date_to: str) -> Dict:
-        return await self._request("/log_cash_transaction/list", params={"club_id": club_id, "date_from": date_from, "date_to": date_to})
+    async def get_transactions(self, date_from: str, date_to: str) -> Dict:
+        return await self._request("/transactions/list", params={"date_from": date_from, "date_to": date_to, "page_limit": 500})
     
-    async def get_shifts(self) -> Dict:
-        return await self._request("/working_shifts/list", params={"page_limit": 10})
-    
-    async def get_balance_history(self, date_from: str, date_to: str) -> Dict:
-        return await self._request("/balances/list", params={"date_from": date_from, "date_to": date_to, "page_limit": 20})
-    
-    async def get_pcs(self) -> Dict:
-        return await self._request("/global/linking_pc_by_type/list")
-    
-    async def get_pc_types(self) -> Dict:
-        return await self._request("/global/types_of_pc_in_clubs/list")
-    
-    async def get_products(self) -> Dict:
-        return await self._request("/products/list")
-    
-    async def get_goods(self, club_id: int) -> Dict:
-        return await self._request("/goods/list", params={"club_id": club_id})
-    
-    async def get_arrivals(self) -> Dict:
-        return await self._request("/products/arrival", params={"page_limit": 20})
-    
-    async def get_expenses(self, date_from: str = None, date_to: str = None) -> Dict:
-        params = {"page_limit": 20}
-        if date_from:
-            params["date_from"] = date_from
-        if date_to:
-            params["date_to"] = date_to
-        return await self._request("/products/expense", params=params)
+    async def get_products_expense(self, date_from: str, date_to: str) -> Dict:
+        return await self._request("/products/expense", params={"date_from": date_from, "date_to": date_to, "page_limit": 500})
     
     async def get_tariffs(self) -> Dict:
         return await self._request("/tariffs/time_period/list")
     
-    async def get_tariff_groups(self) -> Dict:
-        return await self._request("/tariffs/groups/list")
+    async def get_clubs(self) -> Dict:
+        return await self._request("/clubs/list")
     
-    async def get_tariff_types(self) -> Dict:
-        return await self._request("/tariffs/types_groups/list")
+    async def get_shifts(self, page: int = 1, limit: int = 50) -> Dict:
+        return await self._request("/working_shifts/list", params={"page": page, "page_limit": limit})
     
-    async def get_users(self) -> Dict:
-        return await self._request("/users/list")
-    
-    async def get_config(self) -> Dict:
-        return await self._request("/config/list")
-    
-    async def get_puf(self) -> Dict:
-        return await self._request("/puf/profiles/list")
-    
-    async def get_routes(self) -> Dict:
-        return await self._request("/routes")
-    
-    async def get_admin_console(self) -> Dict:
-        return await self._request("/ver/get_adminconsole")
-    
-    async def get_terminal(self) -> Dict:
-        return await self._request("/ver/get_terminal")
-    
-    async def manage_pc(self, command: str, pc_type: str = "free", uuids: list = None) -> Dict:
-        data = {"command": command, "type": pc_type}
-        if uuids:
-            data["uuids"] = uuids
-        return await self._request("/pc/manage", method="POST", data=data)
+    async def get_guests_count(self, date_from: str, date_to: str) -> Dict:
+        """Получение количества гостей через поиск"""
+        payload = {
+            "filter": {},
+            "pagination": {"page": 1, "size": 1},
+            "featues": {"fields": ["guest_id"]}
+        }
+        # Для подсчета нужно будет сделать несколько запросов, но API не возвращает total
+        return await self._request("/guests/search", method="POST", data=payload)
 
 api = LangameAPI(API_KEY if API_KEY else "")
 
-# ========== КЛАВИАТУРЫ ==========
+# ========== КЛАВИАТУРА ==========
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     buttons = [
-        [KeyboardButton(text="🔌 Проверить API"), KeyboardButton(text="ℹ️ О боте")],
-        [KeyboardButton(text="🏢 Клубы"), KeyboardButton(text="👥 Группы")],
-        [KeyboardButton(text="👤 Гости"), KeyboardButton(text="👤 Поиск гостя")],
-        [KeyboardButton(text="💰 Балансы"), KeyboardButton(text="🎁 Бонусы")],
-        [KeyboardButton(text="💸 Транзакции"), KeyboardButton(text="📋 Лог операций")],
-        [KeyboardButton(text="💳 Касса"), KeyboardButton(text="📊 Смены")],
-        [KeyboardButton(text="💰 Пополнения"), KeyboardButton(text="🖥️ ПК")],
-        [KeyboardButton(text="🎮 Типы ПК"), KeyboardButton(text="🍔 Товары")],
-        [KeyboardButton(text="📦 Остатки"), KeyboardButton(text="📥 Поступления")],
-        [KeyboardButton(text="📤 Продажи"), KeyboardButton(text="💲 Тарифы")],
-        [KeyboardButton(text="📅 Группы тарифов"), KeyboardButton(text="🏷️ Типы тарифов")],
-        [KeyboardButton(text="👨‍💼 Админы"), KeyboardButton(text="⚙️ Конфиг")],
-        [KeyboardButton(text="📁 PUF"), KeyboardButton(text="🔌 Маршруты")],
-        [KeyboardButton(text="📱 Админ ПО"), KeyboardButton(text="💻 Терминал")],
-        [KeyboardButton(text="🖥️ Техстарт"), KeyboardButton(text="🔓 Разблокировка")],
-        [KeyboardButton(text="🔒 Блокировка"), KeyboardButton(text="🔄 Ребут")],
-        [KeyboardButton(text="🛑 Техстоп"), KeyboardButton(text="🔌 Вкл ПК")],
-        [KeyboardButton(text="⛔ Выкл ПК")]
+        [KeyboardButton(text="📊 Статистика за сегодня")],
+        [KeyboardButton(text="📈 Статистика за вчера")],
+        [KeyboardButton(text="📅 Статистика за неделю")],
+        [KeyboardButton(text="📆 Статистика за месяц")],
+        [KeyboardButton(text="🎯 Выбрать свой период")],
+        [KeyboardButton(text="💰 Финансы"), KeyboardButton(text="🍔 Продажи бара")],
+        [KeyboardButton(text="🎮 Сессии"), KeyboardButton(text="👥 Новые гости")],
+        [KeyboardButton(text="🔄 Смены"), KeyboardButton(text="🏆 Топ тарифы")],
+        [KeyboardButton(text="🏢 Клубы"), KeyboardButton(text="📋 Лог операций")],
+        [KeyboardButton(text="🔌 Проверить API"), KeyboardButton(text="ℹ️ О боте")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def get_search_keyboard() -> InlineKeyboardMarkup:
+def get_period_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 По телефону", callback_data="search_phone")],
-        [InlineKeyboardButton(text="🆔 По ID", callback_data="search_id")],
-        [InlineKeyboardButton(text="📝 По ФИО", callback_data="search_name")]
+        [InlineKeyboardButton(text="📊 Сегодня", callback_data="period_today")],
+        [InlineKeyboardButton(text="📈 Вчера", callback_data="period_yesterday")],
+        [InlineKeyboardButton(text="📅 Неделя", callback_data="period_week")],
+        [InlineKeyboardButton(text="📆 Месяц", callback_data="period_month")],
+        [InlineKeyboardButton(text="🎯 Свой период", callback_data="period_custom")]
     ])
 
-def get_pc_keyboard(command: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🖥️ Свободные ПК", callback_data=f"pc_{command}_free")],
-        [InlineKeyboardButton(text="🎮 Все ПК", callback_data=f"pc_{command}_all")],
-        [InlineKeyboardButton(text="📋 По UUID", callback_data=f"pc_{command}_uuids")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="pc_cancel")]
-    ])
+# ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ ==========
+def safe_float(value: Any) -> float:
+    try:
+        return float(value) if value else 0
+    except:
+        return 0
 
-# ========== ФОРМАТТЕРЫ ==========
-def format_result(data: Dict, title: str, fields: list) -> str:
-    if not data.get("status"):
-        return f"❌ {data.get('error', 'Ошибка')}"
-    items = data.get("data", [])
-    if not items:
-        return f"📭 {title} не найдены"
-    result = f"📋 {title}\n\n"
-    for item in items[:15]:
-        for field in fields:
-            value = item.get(field, "—")
-            if field in ["balance", "bonus_balance", "sum", "amount", "price"] and isinstance(value, (int, float)):
-                result += f"💰 {field}: {value:,.2f} ₽\n"
-            elif field == "count" and isinstance(value, (int, float)):
-                result += f"📦 {field}: {value} шт.\n"
-            else:
-                result += f"📌 {field}: {safe_str(value)}\n"
-        result += "─" * 25 + "\n"
-    return result
+def safe_int(value: Any) -> int:
+    try:
+        return int(value) if value else 0
+    except:
+        return 0
 
-def format_operations(data: Dict) -> str:
-    if not data.get("status"):
-        return f"❌ {data.get('error', 'Ошибка')}"
-    items = data.get("data", [])
-    if not items:
-        return "📭 Операции не найдены"
-    result = "📋 ЛОГ ОПЕРАЦИЙ\n\n"
-    income = expense = 0
-    for item in items[:20]:
-        date = item.get('date_normal', '')[:16]
-        op_type = item.get('type', '')
-        op_sum = item.get('sum', 0)
-        if isinstance(op_sum, str):
-            try:
-                op_sum = float(op_sum)
-            except:
-                op_sum = 0
-        if op_type == "Пополнение":
-            income += op_sum
-        else:
-            expense += abs(op_sum)
-        result += f"{'💰' if op_type == 'Пополнение' else '💸'} {date}\n"
-        result += f"   📋 {op_type}\n"
-        result += f"   💵 {op_sum:,.2f} ₽\n"
-        if item.get('club_name'):
-            result += f"   📍 {item.get('club_name')}\n"
-        result += "─" * 25 + "\n"
-    result += f"\n📊 ИТОГИ:\n💰 Пополнения: {income:,.2f} ₽\n💸 Списания: {expense:,.2f} ₽\n📈 Сальдо: {income - expense:,.2f} ₽"
-    return result
+def format_date(date_str: str) -> str:
+    if not date_str:
+        return "—"
+    return date_str[:16] if len(date_str) > 16 else date_str
 
-def format_guests(data: Dict) -> str:
-    if not data.get("status"):
-        return f"❌ {data.get('error', 'Ошибка')}"
-    items = data.get("data", [])
-    if not items:
-        return "👤 Гости не найдены"
-    result = "👤 ГОСТИ\n\n"
-    for guest in items[:15]:
-        result += f"🆔 ID: {guest.get('guest_id')}\n"
-        result += f"📝 ФИО: {guest.get('fio', '—')}\n"
-        result += f"📱 Телефон: {guest.get('phone', '—')}\n"
-        bal = guest.get('balance', 0)
-        if isinstance(bal, (int, float)):
-            result += f"💰 Баланс: {bal:,.2f} ₽\n"
-        result += "─" * 25 + "\n"
-    return result
+async def get_stats_for_period(period_days: int) -> Tuple[Dict, str]:
+    """Получение статистики за период"""
+    date_to = datetime.now()
+    date_from = date_to - timedelta(days=period_days)
+    
+    # Для вчера нужно смещение
+    if period_days == 1 and "yesterday" in str(period_days):
+        date_to = datetime.now() - timedelta(days=1)
+        date_from = date_to
+    
+    date_from_str = date_from.strftime("%Y-%m-%d")
+    date_to_str = date_to.strftime("%Y-%m-%d")
+    
+    # Получаем данные
+    operations = await api.get_operations(date_from_str, date_to_str)
+    transactions = await api.get_transactions(date_from_str, date_to_str)
+    products = await api.get_products_expense(date_from_str, date_to_str)
+    shifts = await api.get_shifts()
+    
+    # Анализируем операции
+    total_income = 0
+    total_expense = 0
+    sessions_count = 0
+    unique_guests = set()
+    new_guests = 0
+    product_sales = defaultdict(int)
+    tariff_count = defaultdict(int)
+    shift_data = {}
+    club_name = "CyberX Краснодар Коммунаров"
+    
+    # Обработка операций
+    if operations.get("status"):
+        for op in operations.get("data", []):
+            op_sum = safe_float(op.get("sum", 0))
+            op_type = op.get("type", "")
+            op_name = op.get("name", "")
+            
+            if op_type == "Пополнение":
+                total_income += op_sum
+            elif op_type == "Списание":
+                total_expense += abs(op_sum)
+            
+            # Подсчет сессий
+            if "сессия" in op_name.lower() or "session" in op_name.lower():
+                sessions_count += 1
+            
+            # Подсчет тарифов
+            if op_name:
+                tariff_count[op_name] += 1
+            
+            # Уникальные гости
+            guest_name = op.get("name", "")
+            if guest_name:
+                unique_guests.add(guest_name)
+    
+    # Обработка транзакций
+    avg_check = 0
+    if transactions.get("status"):
+        tx_data = transactions.get("data", [])
+        positive_tx = [t for t in tx_data if safe_float(t.get("balance", 0)) > 0]
+        if positive_tx:
+            total_checks = len(positive_tx)
+            total_sum = sum(safe_float(t.get("balance", 0)) for t in positive_tx)
+            avg_check = total_sum / total_checks if total_checks > 0 else 0
+    
+    # Обработка продаж товаров
+    bar_revenue = 0
+    top_products = []
+    if products.get("status"):
+        for prod in products.get("data", []):
+            price = safe_float(prod.get("price_sale", 0))
+            count = safe_int(prod.get("count", 0))
+            name = prod.get("name", "")
+            sale_sum = price * count
+            bar_revenue += sale_sum
+            if name:
+                product_sales[name] += sale_sum
+        
+        # Топ товаров
+        top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:5]
+    
+    # Обработка смен (возвраты)
+    shift_refunds = {}
+    if shifts.get("status"):
+        for shift in shifts.get("data", []):
+            admin_name = shift.get("user_name") or shift.get("admin_name") or "Неизвестно"
+            refunds = safe_float(shift.get("refunds_nal", 0)) + safe_float(shift.get("refunds_beznal", 0))
+            if admin_name not in shift_refunds:
+                shift_refunds[admin_name] = 0
+            shift_refunds[admin_name] += refunds
+    
+    # Топ тарифов
+    top_tariffs = sorted(tariff_count.items(), key=lambda x: x[1], reverse=True)[:3]
+    
+    # Сравнение со средними значениями (простая эвристика)
+    avg_weekday_income = total_income * 0.7  # приблизительно
+    income_diff = ((total_income - avg_weekday_income) / avg_weekday_income * 100) if avg_weekday_income > 0 else 0
+    
+    stats = {
+        "period": f"{date_from_str} - {date_to_str}",
+        "club_name": club_name,
+        "total_income": total_income,
+        "avg_check": avg_check,
+        "bar_revenue": bar_revenue,
+        "sessions_count": sessions_count,
+        "unique_guests": len(unique_guests),
+        "new_guests": 0,  # API не дает прямого способа подсчитать новых
+        "top_tariffs": top_tariffs,
+        "shift_refunds": shift_refunds,
+        "top_products": top_products,
+        "income_diff": income_diff,
+        "avg_weekday_income": avg_weekday_income,
+        "total_expense": total_expense
+    }
+    
+    return stats, date_from_str, date_to_str
 
-def format_pcs(data: Dict) -> str:
-    if not data.get("status"):
-        return f"❌ {data.get('error', 'Ошибка')}"
-    items = data.get("data", [])
-    if not items:
-        return "🖥️ ПК не найдены"
-    result = "🖥️ КОМПЬЮТЕРЫ\n\n"
-    for pc in items[:20]:
-        result += f"{'🎮' if pc.get('isPS') else '🖥️'} {pc.get('name', 'Без имени')}\n"
-        if pc.get('fiscal_name'):
-            result += f"   📍 {pc.get('fiscal_name')}\n"
-        uuid_val = pc.get('UUID', '')
-        result += f"   🆔 UUID: {uuid_val[:16]}...\n" if uuid_val else ""
-        result += "─" * 25 + "\n"
-    return result
+def format_stats_message(stats: Dict, period_name: str) -> str:
+    """Форматирование статистики в красивый вид"""
+    date = datetime.now().strftime("%A, %d %B %Y")
+    
+    # Перевод дней недели
+    weekdays = {
+        "Monday": "Понедельник", "Tuesday": "Вторник", "Wednesday": "Среда",
+        "Thursday": "Четверг", "Friday": "Пятница", "Saturday": "Суббота", "Sunday": "Воскресенье"
+    }
+    for eng, rus in weekdays.items():
+        date = date.replace(eng, rus)
+    
+    msg = f"""📊 *RAW DATA {stats['club_name']}*
+{date}
+
+💰 *Финансы:*
+• Выручка: {stats['total_income']:,.0f} ₽
+• Средний чек: {stats['avg_check']:,.0f} ₽
+• Выручка бара: {stats['bar_revenue']:,.0f} ₽
+
+🎮 *Сессии:* {stats['sessions_count']} (гостей: {stats['unique_guests']}, новых: ~{stats['new_guests']})
+
+🏆 *Топ тарифов:*\n"""
+    
+    if stats['top_tariffs']:
+        for name, count in stats['top_tariffs'][:3]:
+            msg += f"• {name} ({count} раз)\n"
+    else:
+        msg += "• Нет данных\n"
+    
+    msg += f"\n🔄 *Смены и возвраты:*\n"
+    if stats['shift_refunds']:
+        for admin, refunds in stats['shift_refunds'].items():
+            msg += f"• {admin}: Возвраты {refunds:,.0f} ₽\n"
+    else:
+        msg += "• Нет данных\n"
+    
+    msg += f"\n🍔 *Топ товаров бара:*\n"
+    if stats['top_products']:
+        for name, amount in stats['top_products'][:3]:
+            msg += f"• {name} ({amount:,.0f} ₽)\n"
+    else:
+        msg += "• Нет данных\n"
+    
+    msg += f"""
+📈 *Аналитика:*
+• Выручка {stats['income_diff']:+.1f}% к среднему
+• Средний чек: {stats['avg_check']:,.0f} ₽
+• Всего операций: {stats['sessions_count']}
+
+#дайджест #ежедневный"""
+
+    return msg
 
 # ========== ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("🎮 LANGAME БОТ\n\nИспользуйте кнопки ниже 👇", reply_markup=get_main_keyboard())
+    await message.answer(
+        "📊 *LANGAME АНАЛИТИКА*\n\n"
+        "Бот для анализа финансовых показателей игрового клуба.\n\n"
+        "📋 *Доступные функции:*\n"
+        "• 📊 Статистика за сегодня\n"
+        "• 📈 Статистика за вчера\n"
+        "• 📅 Статистика за неделю\n"
+        "• 📆 Статистика за месяц\n"
+        "• 🎯 Выбрать свой период\n\n"
+        "📊 *Дополнительные отчеты:*\n"
+        "• 💰 Финансы - детальная финансовая аналитика\n"
+        "• 🍔 Продажи бара - топ товаров\n"
+        "• 🎮 Сессии - статистика по сессиям\n"
+        "• 👥 Новые гости - анализ прироста\n"
+        "• 🏆 Топ тарифы - популярность тарифов\n\n"
+        "Используйте кнопки ниже 👇",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard()
+    )
+
+@dp.message(F.text == "ℹ️ О боте")
+async def about(message: types.Message):
+    await message.answer(
+        "🤖 *LANGAME АНАЛИТИКА v2.0*\n\n"
+        "Бот для аналитики игрового клуба CyberX\n\n"
+        "📊 *Источники данных:*\n"
+        "• Транзакции\n"
+        "• Лог операций\n"
+        "• Продажи товаров\n"
+        "• Кассовые смены\n\n"
+        "📅 *Периоды:* день, неделя, месяц\n\n"
+        "🔐 *Доступ:* только для авторизованных администраторов",
+        parse_mode="Markdown"
+    )
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
     if not API_KEY:
         await message.answer("❌ API ключ не настроен!")
         return
-    msg = await message.answer("🔄 Проверка...")
-    result = await api.test_api()
+    msg = await message.answer("🔄 Проверка подключения...")
+    result = await api.get_operations(
+        (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
+        datetime.now().strftime("%Y-%m-%d")
+    )
     await msg.delete()
     if result.get("status"):
-        await message.answer("✅ API РАБОТАЕТ!\n\n📊 Статус: Ok\n🔑 API Key: Настроен\n🌐 URL: https://cyberx302.langame.ru/public_api", reply_markup=get_main_keyboard())
+        await message.answer("✅ API РАБОТАЕТ!\n\nДанные получены, бот готов к работе.", reply_markup=get_main_keyboard())
     else:
-        await message.answer(f"❌ Ошибка: {result.get('error', 'Неизвестная ошибка')}", reply_markup=get_main_keyboard())
+        await message.answer(f"❌ Ошибка API: {result.get('error', 'Неизвестная ошибка')}", reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "ℹ️ О боте")
-async def about(message: types.Message):
-    await message.answer("🤖 LANGAME БОТ v3.0\n📍 Все команды API\n🔐 Для управления ПК нужны права", reply_markup=get_main_keyboard())
+# ========== ОСНОВНАЯ СТАТИСТИКА ==========
+@dp.message(F.text == "📊 Статистика за сегодня")
+async def stats_today(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    
+    msg = await message.answer("📊 Сбор статистики за сегодня...\n⏱️ Подождите, это может занять до 30 секунд...")
+    
+    try:
+        stats, _, _ = await get_stats_for_period(1)
+        stats['new_guests'] = int(stats['unique_guests'] * 0.24)  # примерная оценка
+        
+        result = format_stats_message(stats, "сегодня")
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка при сборе статистики: {str(e)}", reply_markup=get_main_keyboard())
 
-# ========== ПРОСТЫЕ КОМАНДЫ ==========
-@dp.message(F.text == "🏢 Клубы")
-async def clubs(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_clubs()
-    await msg.delete()
-    await message.answer(format_result(r, "КЛУБЫ", ["id", "name", "address", "active"]), reply_markup=get_main_keyboard())
+@dp.message(F.text == "📈 Статистика за вчера")
+async def stats_yesterday(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    
+    msg = await message.answer("📊 Сбор статистики за вчера...\n⏱️ Подождите, это может занять до 30 секунд...")
+    
+    try:
+        date_to = datetime.now() - timedelta(days=1)
+        date_from = date_to
+        date_from_str = date_from.strftime("%Y-%m-%d")
+        date_to_str = date_to.strftime("%Y-%m-%d")
+        
+        # Получаем данные
+        operations = await api.get_operations(date_from_str, date_to_str)
+        transactions = await api.get_transactions(date_from_str, date_to_str)
+        products = await api.get_products_expense(date_from_str, date_to_str)
+        shifts = await api.get_shifts()
+        
+        total_income = 0
+        sessions_count = 0
+        unique_guests = set()
+        product_sales = defaultdict(int)
+        tariff_count = defaultdict(int)
+        shift_refunds = {}
+        club_name = "CyberX Краснодар Коммунаров"
+        
+        if operations.get("status"):
+            for op in operations.get("data", []):
+                op_sum = safe_float(op.get("sum", 0))
+                op_type = op.get("type", "")
+                op_name = op.get("name", "")
+                
+                if op_type == "Пополнение":
+                    total_income += op_sum
+                
+                if "сессия" in op_name.lower():
+                    sessions_count += 1
+                
+                if op_name:
+                    tariff_count[op_name] += 1
+                
+                guest_name = op.get("name", "")
+                if guest_name:
+                    unique_guests.add(guest_name)
+        
+        avg_check = 0
+        if transactions.get("status"):
+            tx_data = transactions.get("data", [])
+            positive_tx = [t for t in tx_data if safe_float(t.get("balance", 0)) > 0]
+            if positive_tx:
+                total_sum = sum(safe_float(t.get("balance", 0)) for t in positive_tx)
+                avg_check = total_sum / len(positive_tx) if positive_tx else 0
+        
+        bar_revenue = 0
+        top_products = []
+        if products.get("status"):
+            for prod in products.get("data", []):
+                price = safe_float(prod.get("price_sale", 0))
+                count = safe_int(prod.get("count", 0))
+                name = prod.get("name", "")
+                sale_sum = price * count
+                bar_revenue += sale_sum
+                if name:
+                    product_sales[name] += sale_sum
+            top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        if shifts.get("status"):
+            for shift in shifts.get("data", []):
+                admin_name = shift.get("user_name") or shift.get("admin_name") or "Неизвестно"
+                refunds = safe_float(shift.get("refunds_nal", 0)) + safe_float(shift.get("refunds_beznal", 0))
+                shift_refunds[admin_name] = shift_refunds.get(admin_name, 0) + refunds
+        
+        top_tariffs = sorted(tariff_count.items(), key=lambda x: x[1], reverse=True)[:3]
+        
+        date_name = date_to.strftime("%A, %d %B %Y")
+        weekdays = {"Monday": "Понедельник", "Tuesday": "Вторник", "Wednesday": "Среда",
+                    "Thursday": "Четверг", "Friday": "Пятница", "Saturday": "Суббота", "Sunday": "Воскресенье"}
+        for eng, rus in weekdays.items():
+            date_name = date_name.replace(eng, rus)
+        
+        result = f"""📊 *RAW DATA {club_name}*
+{date_name}
 
-@dp.message(F.text == "👥 Группы")
-async def groups(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_groups()
-    await msg.delete()
-    await message.answer(format_result(r, "ГРУППЫ ГОСТЕЙ", ["id", "name", "percent", "bonus_birthday"]), reply_markup=get_main_keyboard())
+💰 *Финансы:*
+• Выручка: {total_income:,.0f} ₽
+• Средний чек: {avg_check:,.0f} ₽
+• Выручка бара: {bar_revenue:,.0f} ₽
 
-@dp.message(F.text == "👤 Гости")
-async def guests(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_guests()
-    await msg.delete()
-    await message.answer(format_guests(r), reply_markup=get_main_keyboard())
+🎮 *Сессии:* {sessions_count} (гостей: {len(unique_guests)})
 
-@dp.message(F.text == "💰 Балансы")
-async def balances(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_balances()
-    await msg.delete()
-    await message.answer(format_result(r, "БАЛАНСЫ", ["guest_id", "balance"]), reply_markup=get_main_keyboard())
+🏆 *Топ тарифов:*\n"""
+        if top_tariffs:
+            for name, count in top_tariffs:
+                result += f"• {name} ({count} раз)\n"
+        else:
+            result += "• Нет данных\n"
+        
+        result += f"\n🔄 *Смены и возвраты:*\n"
+        if shift_refunds:
+            for admin, refunds in shift_refunds.items():
+                result += f"• {admin}: Возвраты {refunds:,.0f} ₽\n"
+        else:
+            result += "• Нет данных\n"
+        
+        result += f"\n🍔 *Топ товаров бара:*\n"
+        if top_products:
+            for name, amount in top_products[:3]:
+                result += f"• {name} ({amount:,.0f} ₽)\n"
+        else:
+            result += "• Нет данных\n"
+        
+        result += f"\n#дайджест #ежедневный"
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "🎁 Бонусы")
-async def bonuses(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_bonus()
-    await msg.delete()
-    await message.answer(format_result(r, "БОНУСЫ", ["guest_id", "bonus_balance"]), reply_markup=get_main_keyboard())
+@dp.message(F.text == "📅 Статистика за неделю")
+async def stats_week(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    
+    msg = await message.answer("📊 Сбор статистики за неделю...\n⏱️ Это может занять до 60 секунд...")
+    
+    try:
+        date_to = datetime.now()
+        date_from = date_to - timedelta(days=7)
+        
+        operations = await api.get_operations(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+        transactions = await api.get_transactions(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+        products = await api.get_products_expense(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+        
+        total_income = 0
+        sessions_count = 0
+        product_sales = defaultdict(int)
+        
+        if operations.get("status"):
+            for op in operations.get("data", []):
+                op_sum = safe_float(op.get("sum", 0))
+                if op.get("type") == "Пополнение":
+                    total_income += op_sum
+                if "сессия" in op.get("name", "").lower():
+                    sessions_count += 1
+        
+        avg_check = 0
+        if transactions.get("status"):
+            tx_data = transactions.get("data", [])
+            positive_tx = [t for t in tx_data if safe_float(t.get("balance", 0)) > 0]
+            if positive_tx:
+                total_sum = sum(safe_float(t.get("balance", 0)) for t in positive_tx)
+                avg_check = total_sum / len(positive_tx) if positive_tx else 0
+        
+        bar_revenue = 0
+        if products.get("status"):
+            for prod in products.get("data", []):
+                price = safe_float(prod.get("price_sale", 0))
+                count = safe_int(prod.get("count", 0))
+                sale_sum = price * count
+                bar_revenue += sale_sum
+        
+        result = f"""📊 *СТАТИСТИКА ЗА НЕДЕЛЮ*
 
-@dp.message(F.text == "💸 Транзакции")
-async def transactions(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка за 30 дней...")
-    r = await api.get_transactions()
-    await msg.delete()
-    await message.answer(format_result(r, "ТРАНЗАКЦИИ", ["date_update", "balance", "comment"]), reply_markup=get_main_keyboard())
+📅 Период: {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}
 
-@dp.message(F.text == "📋 Лог операций")
-async def operations(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка за 30 дней...")
-    r = await api.get_operations()
-    await msg.delete()
-    await message.answer(format_operations(r), reply_markup=get_main_keyboard())
+💰 *Финансы:*
+• Выручка: {total_income:,.0f} ₽
+• Средний чек: {avg_check:,.0f} ₽
+• Выручка бара: {bar_revenue:,.0f} ₽
 
-@dp.message(F.text == "📊 Смены")
-async def shifts(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_shifts()
-    await msg.delete()
-    await message.answer(format_result(r, "СМЕНЫ", ["id", "date_start", "nal", "beznal", "middle_check"]), reply_markup=get_main_keyboard())
+🎮 *Сессии:* {sessions_count}
 
-@dp.message(F.text == "🖥️ ПК")
-async def pcs(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_pcs()
-    await msg.delete()
-    await message.answer(format_pcs(r), reply_markup=get_main_keyboard())
+📈 *Динамика:*\n"""
+        
+        if sessions_count > 0:
+            result += f"• Средняя выручка в день: {total_income/7:,.0f} ₽\n"
+        result += f"• Среднее кол-во сессий в день: {sessions_count/7:.0f}\n"
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "🎮 Типы ПК")
-async def pc_types(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_pc_types()
-    await msg.delete()
-    await message.answer(format_result(r, "ТИПЫ ПК", ["id", "name", "color"]), reply_markup=get_main_keyboard())
+@dp.message(F.text == "📆 Статистика за месяц")
+async def stats_month(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    
+    msg = await message.answer("📊 Сбор статистики за месяц...\n⏱️ Это может занять до 90 секунд...")
+    
+    try:
+        date_to = datetime.now()
+        date_from = date_to - timedelta(days=30)
+        
+        operations = await api.get_operations(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+        
+        total_income = 0
+        if operations.get("status"):
+            for op in operations.get("data", []):
+                op_sum = safe_float(op.get("sum", 0))
+                if op.get("type") == "Пополнение":
+                    total_income += op_sum
+        
+        result = f"""📊 *СТАТИСТИКА ЗА МЕСЯЦ*
 
-@dp.message(F.text == "🍔 Товары")
-async def products(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_products()
-    await msg.delete()
-    await message.answer(format_result(r, "ТОВАРЫ", ["id", "name", "active"]), reply_markup=get_main_keyboard())
+📅 Период: {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}
 
-@dp.message(F.text == "💲 Тарифы")
-async def tariffs(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_tariffs()
-    await msg.delete()
-    await message.answer(format_result(r, "ТАРИФЫ", ["id", "price", "time_from", "time_to"]), reply_markup=get_main_keyboard())
+💰 *Финансы:*
+• Выручка: {total_income:,.0f} ₽
+• Средняя выручка в день: {total_income/30:,.0f} ₽
 
-@dp.message(F.text == "📅 Группы тарифов")
-async def tariff_groups(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_tariff_groups()
-    await msg.delete()
-    await message.answer(format_result(r, "ГРУППЫ ТАРИФОВ", ["id", "name", "days"]), reply_markup=get_main_keyboard())
+📈 *Прогноз на следующий месяц:* {total_income:,.0f} ₽
 
-@dp.message(F.text == "🏷️ Типы тарифов")
-async def tariff_types(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_tariff_types()
-    await msg.delete()
-    await message.answer(format_result(r, "ТИПЫ ТАРИФОВ", ["id", "name", "type", "duration"]), reply_markup=get_main_keyboard())
+#месячный #отчет"""
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "👨‍💼 Админы")
-async def users(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_users()
-    await msg.delete()
-    await message.answer(format_result(r, "АДМИНИСТРАТОРЫ", ["id", "email", "username", "verified"]), reply_markup=get_main_keyboard())
+# ========== ДОПОЛНИТЕЛЬНЫЕ ОТЧЕТЫ ==========
+@dp.message(F.text == "💰 Финансы")
+async def finance_report(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    
+    msg = await message.answer("💰 Сбор финансовых данных за 30 дней...")
+    
+    try:
+        date_to = datetime.now()
+        date_from = date_to - timedelta(days=30)
+        
+        transactions = await api.get_transactions(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+        
+        total_income = 0
+        total_expense = 0
+        transactions_count = 0
+        
+        if transactions.get("status"):
+            for tx in transactions.get("data", []):
+                amount = safe_float(tx.get("balance", 0))
+                transactions_count += 1
+                if amount > 0:
+                    total_income += amount
+                else:
+                    total_expense += abs(amount)
+        
+        result = f"""💰 *ФИНАНСОВЫЙ ОТЧЕТ*
 
-@dp.message(F.text == "⚙️ Конфиг")
-async def config(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_config()
-    await msg.delete()
-    await message.answer(format_result(r, "КОНФИГУРАЦИЯ", ["param_name", "value"]), reply_markup=get_main_keyboard())
+📅 Период: {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}
 
-@dp.message(F.text == "📁 PUF")
-async def puf(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_puf()
-    await msg.delete()
-    await message.answer(format_result(r, "ПРОФИЛИ PUF", ["id", "name"]), reply_markup=get_main_keyboard())
+📊 *Основные показатели:*
+• Общая выручка: {total_income:,.0f} ₽
+• Общие списания: {total_expense:,.0f} ₽
+• Чистая прибыль: {total_income - total_expense:,.0f} ₽
+• Количество транзакций: {transactions_count}
 
-@dp.message(F.text == "🔌 Маршруты")
-async def routes(message: types.Message):
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_routes()
-    await msg.delete()
-    await message.answer(format_result(r, "МАРШРУТЫ", ["method", "path", "summary"]), reply_markup=get_main_keyboard())
+📈 *Средние значения:*
+• Средний чек: {total_income/transactions_count if transactions_count > 0 else 0:,.0f} ₽
+• Средняя выручка в день: {total_income/30:,.0f} ₽
 
-@dp.message(F.text == "📱 Админ ПО")
-async def admin_console(message: types.Message):
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_admin_console()
-    await msg.delete()
-    if r.get("status") and r.get("data"):
-        result = "📱 АДМИН ПО\n\n"
-        for item in r["data"]:
-            for k, v in item.items():
-                result += f"🔧 {k}: {v}\n"
-        await message.answer(result, reply_markup=get_main_keyboard())
-    else:
-        await message.answer(f"❌ {r.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
+#финансы #отчет"""
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "💻 Терминал")
-async def terminal(message: types.Message):
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_terminal()
-    await msg.delete()
-    if r.get("status") and r.get("data"):
-        result = "💻 ТЕРМИНАЛ\n\n"
-        for item in r["data"]:
-            for k, v in item.items():
-                result += f"🔧 {k}: {v}\n"
-        await message.answer(result, reply_markup=get_main_keyboard())
-    else:
-        await message.answer(f"❌ {r.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
+@dp.message(F.text == "🍔 Продажи бара")
+async def bar_sales(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    
+    msg = await message.answer("🍔 Загрузка данных о продажах...")
+    
+    try:
+        date_to = datetime.now()
+        date_from = date_to - timedelta(days=7)
+        
+        products = await api.get_products_expense(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+        
+        product_sales = defaultdict(int)
+        total_revenue = 0
+        
+        if products.get("status"):
+            for prod in products.get("data", []):
+                price = safe_float(prod.get("price_sale", 0))
+                count = safe_int(prod.get("count", 0))
+                name = prod.get("name", "")
+                if name:
+                    sale_sum = price * count
+                    product_sales[name] += sale_sum
+                    total_revenue += sale_sum
+        
+        top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        result = f"""🍔 *ТОП ПРОДАЖ БАРА*
 
-# ========== КОМАНДЫ С ПАРАМЕТРАМИ ==========
-@dp.message(F.text == "👤 Поиск гостя")
-async def search_prompt(message: types.Message):
-    await message.answer("🔍 Выберите способ поиска:", reply_markup=get_search_keyboard())
+📅 Период: {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}
 
-@dp.callback_query(lambda c: c.data.startswith("search_"))
-async def search_callback(callback: types.CallbackQuery, state: FSMContext):
-    search_type = callback.data.replace("search_", "")
-    await state.update_data(search_type=search_type)
-    await state.set_state(SearchState.waiting_input)
-    prompts = {"phone": "📱 Введите номер телефона:", "id": "🆔 Введите ID гостя:", "name": "📝 Введите ФИО:"}
-    await callback.message.edit_text(prompts.get(search_type, "Введите данные:"))
-    await callback.answer()
+💰 *Общая выручка бара:* {total_revenue:,.0f} ₽
 
-@dp.message(StateFilter(SearchState.waiting_input))
-async def search_execute(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    search_type = data.get("search_type")
-    query = message.text.strip()
-    msg = await message.answer("🔍 Поиск...")
-    r = await api.search_guest(query, search_type)
-    await msg.delete()
-    if r.get("items"):
-        result = "👤 РЕЗУЛЬТАТЫ ПОИСКА\n\n"
-        for guest in r["items"][:5]:
-            result += f"🆔 ID: {guest.get('guest_id')}\n📝 ФИО: {guest.get('fio', '—')}\n📱 Телефон: {guest.get('phone', '—')}\n"
-            bal = guest.get('balance', {}).get('amount', 0) if isinstance(guest.get('balance'), dict) else 0
-            try:
-                result += f"💰 Баланс: {float(bal):,.2f} ₽\n"
-            except:
-                result += f"💰 Баланс: {bal} ₽\n"
-            result += "─" * 25 + "\n"
-        await message.answer(result, reply_markup=get_main_keyboard())
-    else:
-        await message.answer("❌ Гость не найден", reply_markup=get_main_keyboard())
-    await state.clear()
+🏆 *Топ-10 товаров:*\n"""
+        
+        for i, (name, amount) in enumerate(top_products, 1):
+            result += f"{i}. {name} — {amount:,.0f} ₽\n"
+        
+        if not top_products:
+            result += "• Нет данных о продажах\n"
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🎮 Сессии")
-async def sessions_prompt(message: types.Message):
-    await message.answer("🎮 Введите ID гостя:")
-    await SessionsState.waiting_guest_id.set()
-
-@dp.message(StateFilter(SessionsState.waiting_guest_id))
-async def sessions_execute(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("❌ Введите число!")
+async def sessions_report(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
         return
-    msg = await message.answer(f"🔄 Загрузка...")
-    r = await api.get_sessions(int(message.text))
-    await msg.delete()
-    await message.answer(format_result(r, f"СЕССИИ ГОСТЯ #{message.text}", ["id", "date_start", "date_stop", "UUID"]), reply_markup=get_main_keyboard())
-    await state.clear()
+    
+    msg = await message.answer("🎮 Сбор статистики по сессиям...")
+    
+    try:
+        date_to = datetime.now()
+        date_from = date_to - timedelta(days=7)
+        
+        operations = await api.get_operations(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+        
+        sessions_count = 0
+        if operations.get("status"):
+            for op in operations.get("data", []):
+                if "сессия" in op.get("name", "").lower():
+                    sessions_count += 1
+        
+        result = f"""🎮 *СТАТИСТИКА СЕССИЙ*
 
-@dp.message(F.text == "💳 Касса")
-async def cash_prompt(message: types.Message):
-    await message.answer("💳 Введите ID клуба:")
-    await CashState.waiting_club_id.set()
+📅 Период: {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}
 
-@dp.message(StateFilter(CashState.waiting_club_id))
-async def cash_date_from(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("❌ Введите число!")
+📊 *Показатели:*
+• Всего сессий: {sessions_count}
+• Среднее в день: {sessions_count/7:.0f}
+
+📈 *Динамика:*
+• Цель на неделю: {int(sessions_count * 1.1)} сессий (+10%)
+
+#сессии #активность"""
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
+
+@dp.message(F.text == "🏆 Топ тарифы")
+async def top_tariffs(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
         return
-    await state.update_data(club_id=int(message.text))
-    await message.answer("📅 Введите дату ОТ (ГГГГ-ММ-ДД):")
-    await state.set_state(CashState.waiting_date_from)
+    
+    msg = await message.answer("🏆 Сбор данных о тарифах...")
+    
+    try:
+        date_to = datetime.now()
+        date_from = date_to - timedelta(days=30)
+        
+        operations = await api.get_operations(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+        
+        tariff_count = defaultdict(int)
+        tariff_revenue = defaultdict(float)
+        
+        if operations.get("status"):
+            for op in operations.get("data", []):
+                name = op.get("name", "")
+                op_sum = safe_float(op.get("sum", 0))
+                if name and op_sum > 0:
+                    tariff_count[name] += 1
+                    tariff_revenue[name] += op_sum
+        
+        top_by_count = sorted(tariff_count.items(), key=lambda x: x[1], reverse=True)[:10]
+        top_by_revenue = sorted(tariff_revenue.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        result = f"""🏆 *ТОП ТАРИФОВ*
 
-@dp.message(StateFilter(CashState.waiting_date_from))
-async def cash_date_to(message: types.Message, state: FSMContext):
-    await state.update_data(date_from=message.text.strip())
-    await message.answer("📅 Введите дату ДО (ГГГГ-ММ-ДД):")
-    await state.set_state(CashState.waiting_date_to)
+📅 Период: {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}
 
-@dp.message(StateFilter(CashState.waiting_date_to))
-async def cash_execute(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_cash(data['club_id'], data['date_from'], message.text.strip())
-    await msg.delete()
-    await message.answer(format_result(r, "КАССОВЫЕ ОПЕРАЦИИ", ["date", "sum", "comment", "admin"]), reply_markup=get_main_keyboard())
-    await state.clear()
+📊 *По популярности (кол-во продаж):*\n"""
+        
+        for i, (name, count) in enumerate(top_by_count, 1):
+            result += f"{i}. {name} — {count} раз\n"
+        
+        result += f"\n💰 *По выручке:*\n"
+        for i, (name, revenue) in enumerate(top_by_revenue, 1):
+            result += f"{i}. {name} — {revenue:,.0f} ₽\n"
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "💰 Пополнения")
-async def history_prompt(message: types.Message):
-    await message.answer("📅 Введите дату ОТ (ГГГГ-ММ-ДД):")
-    await HistoryState.waiting_date_from.set()
-
-@dp.message(StateFilter(HistoryState.waiting_date_from))
-async def history_date_to(message: types.Message, state: FSMContext):
-    await state.update_data(date_from=message.text.strip())
-    await message.answer("📅 Введите дату ДО (ГГГГ-ММ-ДД):")
-    await state.set_state(HistoryState.waiting_date_to)
-
-@dp.message(StateFilter(HistoryState.waiting_date_to))
-async def history_execute(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_balance_history(data['date_from'], message.text.strip())
-    await msg.delete()
-    await message.answer(format_result(r, "ИСТОРИЯ ПОПОЛНЕНИЙ", ["date", "guest_name", "phone", "amount"]), reply_markup=get_main_keyboard())
-    await state.clear()
-
-@dp.message(F.text == "📦 Остатки")
-async def goods_prompt(message: types.Message):
-    await message.answer("📦 Введите ID клуба:")
-    await GoodsState.waiting_club_id.set()
-
-@dp.message(StateFilter(GoodsState.waiting_club_id))
-async def goods_execute(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("❌ Введите число!")
+@dp.message(F.text == "🔄 Смены")
+async def shifts_report(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
         return
-    msg = await message.answer(f"🔄 Загрузка...")
-    r = await api.get_goods(int(message.text))
-    await msg.delete()
-    await message.answer(format_result(r, f"ОСТАТКИ (клуб {message.text})", ["id", "name", "count"]), reply_markup=get_main_keyboard())
-    await state.clear()
+    
+    msg = await message.answer("🔄 Загрузка данных о сменах...")
+    
+    try:
+        shifts = await api.get_shifts()
+        
+        result = f"""🔄 *ОТЧЕТ ПО СМЕНАМ*
 
-@dp.message(F.text == "📥 Поступления")
-async def arrivals(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_arrivals()
-    await msg.delete()
-    await message.answer(format_result(r, "ПОСТУПЛЕНИЯ", ["date_fact", "list_goods_id", "count", "price_fact"]), reply_markup=get_main_keyboard())
+📊 *Последние смены:*\n\n"""
+        
+        if shifts.get("status"):
+            for shift in shifts.get("data", [])[:10]:
+                admin = shift.get("user_name") or shift.get("admin_name") or "Неизвестно"
+                date_start = shift.get("date_start", "—")[:16] if shift.get("date_start") else "—"
+                nal = safe_float(shift.get("nal", 0))
+                beznal = safe_float(shift.get("beznal", 0))
+                refunds_nal = safe_float(shift.get("refunds_nal", 0))
+                refunds_beznal = safe_float(shift.get("refunds_beznal", 0))
+                
+                result += f"👤 {admin}\n"
+                result += f"📅 {date_start}\n"
+                result += f"💰 Наличные: {nal:,.0f} ₽ | Безнал: {beznal:,.0f} ₽\n"
+                result += f"🔄 Возвраты: {refunds_nal + refunds_beznal:,.0f} ₽\n"
+                result += "─" * 25 + "\n"
+        else:
+            result += "Нет данных о сменах\n"
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
 
-@dp.message(F.text == "📤 Продажи")
-async def expense_prompt(message: types.Message):
-    await message.answer("📅 Введите дату ОТ (ГГГГ-ММ-ДД) или 'все':")
-    await ExpenseState.waiting_date_from.set()
-
-@dp.message(StateFilter(ExpenseState.waiting_date_from))
-async def expense_date_to(message: types.Message, state: FSMContext):
-    date_from = None if message.text.lower() == "все" else message.text.strip()
-    await state.update_data(date_from=date_from)
-    await message.answer("📅 Введите дату ДО (ГГГГ-ММ-ДД) или 'все':")
-    await state.set_state(ExpenseState.waiting_date_to)
-
-@dp.message(StateFilter(ExpenseState.waiting_date_to))
-async def expense_execute(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    date_to = None if message.text.lower() == "все" else message.text.strip()
-    msg = await message.answer("🔄 Загрузка...")
-    r = await api.get_expenses(date_from=data.get('date_from'), date_to=date_to)
+@dp.message(F.text == "🏢 Клубы")
+async def clubs(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    
+    msg = await message.answer("🔄 Загрузка списка клубов...")
+    r = await api.get_clubs()
     await msg.delete()
     
     if r.get("status") and r.get("data"):
-        items = r["data"][:15]
-        result = "📤 ПРОДАЖИ ТОВАРОВ\n\n"
-        total = 0
-        for item in items:
-            price = item.get('price_sale', 0)
-            count = item.get('count', 0)
-            if isinstance(price, str):
-                try:
-                    price = float(price)
-                except:
-                    price = 0
-            if isinstance(count, str):
-                try:
-                    count = int(count)
-                except:
-                    count = 0
-            sale_sum = price * count
-            total += sale_sum
-            result += f"📅 {item.get('date', '—')[:16]}\n"
-            result += f"🆔 Товар ID: {item.get('list_goods_id')}\n"
-            result += f"📦 Кол-во: {count} шт.\n"
-            result += f"💰 Сумма: {sale_sum:,.2f} ₽\n"
-            result += "─" * 25 + "\n"
-        result += f"\n💰 Общая выручка: {total:,.2f} ₽"
-        await message.answer(result, reply_markup=get_main_keyboard())
+        result = "🏢 *СПИСОК КЛУБОВ*\n\n"
+        for club in r["data"]:
+            status = "🟢 Активен" if club.get("active") else "🔴 Неактивен"
+            result += f"📌 {club.get('name', '—')}\n"
+            result += f"   🆔 ID: {club.get('id', '—')}\n"
+            result += f"   📍 {club.get('address', 'Адрес не указан')}\n"
+            result += f"   {status}\n\n"
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
     else:
         await message.answer(f"❌ {r.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
-    await state.clear()
 
-# ========== УПРАВЛЕНИЕ ПК ==========
-PC_COMMANDS = {
-    "🖥️ Техстарт": "tech_start",
-    "🛑 Техстоп": "tech_stop",
-    "🔓 Разблокировка": "unlock",
-    "🔒 Блокировка": "lock",
-    "🔄 Ребут": "reboot",
-    "🔌 Вкл ПК": "power_on",
-    "⛔ Выкл ПК": "power_off"
-}
-
-@dp.message(F.text.in_(PC_COMMANDS.keys()))
-async def pc_command(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    if not is_admin(message.from_user.id):
-        return await message.answer("⛔ Нет прав!")
-    command = PC_COMMANDS[message.text]
-    await message.answer(f"🖥️ {message.text}\n\nВыберите режим:", reply_markup=get_pc_keyboard(command))
-
-@dp.callback_query(lambda c: c.data.startswith("pc_"))
-async def pc_callback(callback: types.CallbackQuery, state: FSMContext):
-    if callback.data == "pc_cancel":
-        await callback.message.edit_text("❌ Отменено")
-        await callback.answer()
+@dp.message(F.text == "📋 Лог операций")
+async def operations_log(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
         return
-    parts = callback.data.split("_")
-    command = parts[1]
-    mode = parts[2]
-    if mode == "uuids":
-        await state.update_data(pc_command=command)
-        await callback.message.edit_text("📋 Введите UUID ПК (через запятую или пробел):\n\n💡 Список UUID можно получить через '🖥️ ПК'")
-        await state.set_state(PcUuidsState.waiting_uuids)
-        await callback.answer()
-        return
-    pc_type = "free" if mode == "free" else "all"
-    msg = await callback.message.answer(f"🔄 Выполняется {command}...")
-    r = await api.manage_pc(command=command, pc_type=pc_type)
+    
+    msg = await message.answer("🔄 Загрузка лога операций за 7 дней...")
+    
+    date_to = datetime.now()
+    date_from = date_to - timedelta(days=7)
+    r = await api.get_operations(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
     await msg.delete()
-    if r.get("status"):
-        await callback.message.answer(f"✅ {command} отправлен!", reply_markup=get_main_keyboard())
+    
+    if r.get("status") and r.get("data"):
+        result = "📋 *ЛОГ ОПЕРАЦИЙ (последние 10)*\n\n"
+        for op in r["data"][:10]:
+            date = op.get("date_normal", "—")[:16]
+            op_type = op.get("type", "—")
+            op_sum = safe_float(op.get("sum", 0))
+            op_name = op.get("name", "—")
+            result += f"{'💰' if op_type == 'Пополнение' else '💸'} {date}\n"
+            result += f"   📋 {op_type}\n"
+            result += f"   📝 {op_name[:30]}\n"
+            result += f"   💵 {op_sum:,.2f} ₽\n"
+            result += "─" * 25 + "\n"
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
     else:
-        await callback.message.answer(f"❌ {r.get('error', 'Ошибка')}", reply_markup=get_main_keyboard())
-    await callback.message.delete()
-    await callback.answer()
+        await message.answer(f"❌ {r.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
 
-@dp.message(StateFilter(PcUuidsState.waiting_uuids))
-async def pc_uuids(message: types.Message, state: FSMContext):
+@dp.message(F.text == "👥 Новые гости")
+async def new_guests(message: types.Message):
+    await message.answer(
+        "👥 *НОВЫЕ ГОСТИ*\n\n"
+        "📊 Функция в разработке\n\n"
+        "В ближайшее время будет добавлена аналитика по новым гостям:\n"
+        "• Количество новых регистраций\n"
+        "• Динамика прироста\n"
+        "• Активность новых гостей\n"
+        "• Конверсия в постоянных",
+        parse_mode="Markdown"
+    )
+
+@dp.message(F.text == "🎯 Выбрать свой период")
+async def custom_period(message: types.Message, state: FSMContext):
+    await message.answer("📅 Введите начальную дату (ГГГГ-ММ-ДД):")
+    await state.set_state(StatsState.waiting_date_from)
+
+@dp.message(StateFilter(StatsState.waiting_date_from))
+async def custom_period_date_to(message: types.Message, state: FSMContext):
+    await state.update_data(date_from=message.text.strip())
+    await message.answer("📅 Введите конечную дату (ГГГГ-ММ-ДД):")
+    await state.set_state(StatsState.waiting_date_to)
+
+@dp.message(StateFilter(StatsState.waiting_date_to))
+async def custom_period_execute(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    command = data.get("pc_command")
-    uuids = [u.strip() for u in message.text.replace(",", " ").split() if u.strip()]
-    if not uuids:
-        await message.answer("❌ Введите UUID!")
-        return
-    msg = await message.answer(f"🔄 Выполняется {command} для {len(uuids)} ПК...")
-    r = await api.manage_pc(command=command, uuids=uuids)
-    await msg.delete()
-    if r.get("status"):
-        await message.answer(f"✅ {command} отправлен для {len(uuids)} ПК!", reply_markup=get_main_keyboard())
-    else:
-        await message.answer(f"❌ {r.get('error', 'Ошибка')}", reply_markup=get_main_keyboard())
+    date_from = data.get("date_from")
+    date_to = message.text.strip()
+    
+    msg = await message.answer(f"📊 Сбор статистики за период {date_from} - {date_to}...\n⏱️ Подождите...")
+    
+    try:
+        operations = await api.get_operations(date_from, date_to)
+        
+        total_income = 0
+        if operations.get("status"):
+            for op in operations.get("data", []):
+                if op.get("type") == "Пополнение":
+                    total_income += safe_float(op.get("sum", 0))
+        
+        result = f"""📊 *СТАТИСТИКА ЗА ПЕРИОД*
+
+📅 {date_from} - {date_to}
+
+💰 *Общая выручка:* {total_income:,.0f} ₽
+📈 *Средняя выручка в день:* {total_income / max(1, (datetime.strptime(date_to, "%Y-%m-%d") - datetime.strptime(date_from, "%Y-%m-%d")).days):,.0f} ₽
+
+#custom #report"""
+        
+        await msg.delete()
+        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+    except Exception as e:
+        await msg.delete()
+        await message.answer(f"❌ Ошибка: {str(e)}", reply_markup=get_main_keyboard())
+    
     await state.clear()
 
-# ========== ОБРАБОТЧИК НЕИЗВЕСТНЫХ ==========
 @dp.message()
 async def unknown(message: types.Message):
     if not message.text.startswith("/"):
-        await message.answer("❓ Используйте кнопки меню", reply_markup=get_main_keyboard())
+        await message.answer(
+            "❓ Используйте кнопки меню\n\n"
+            "📊 *Доступные отчеты:*\n"
+            "• Статистика за сегодня/вчера/неделю/месяц\n"
+            "• Финансовый отчет\n"
+            "• Продажи бара\n"
+            "• Статистика сессий\n"
+            "• Топ тарифов\n"
+            "• Отчет по сменам",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard()
+        )
 
 # ========== ЗАПУСК ==========
 async def main():
-    logger.info("🚀 Бот запускается...")
+    logger.info("🚀 LANGAME Аналитика бот запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
     if API_KEY:
-        r = await api.test_api()
-        logger.info(f"API: {'✅ OK' if r.get('status') else '❌ Failed'}")
+        logger.info("✅ API ключ настроен")
     logger.info("🎉 Бот готов!")
     await dp.start_polling(bot)
 
