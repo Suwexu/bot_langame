@@ -59,7 +59,6 @@ class LangameAPI:
         self.headers = {"X-Request-Token": api_key, "Content-Type": "application/json"}
     
     async def get_operations(self, date_from: str, date_to: str) -> Dict:
-        """Лог операций - единственный работающий эндпоинт"""
         url = f"{self.base_url}/all_operations_log/list"
         params = {"date_from": date_from, "date_to": date_to}
         try:
@@ -73,7 +72,6 @@ class LangameAPI:
             return {"status": False, "error": str(e)}
     
     async def get_clubs(self) -> Dict:
-        """Список клубов"""
         url = f"{self.base_url}/clubs/list"
         try:
             async with aiohttp.ClientSession() as session:
@@ -151,28 +149,31 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
     
     for item in operations_list:
         op_sum = safe_float(item.get("sum", 0))
-        op_type = item.get("type", "")
+        op_type = item.get("type", "")  # "plus" или "minus"
         op_name = item.get("name", "")
         club_name = item.get("club_name", club_name)
         
-        # Пополнения (выручка)
-        if op_type == "Пополнение" and op_sum > 0:
+        # Пополнения (выручка) - тип "plus"
+        if op_type == "plus" and op_sum > 0:
             total_income += op_sum
+            logger.debug(f"Пополнение: {op_name} на {op_sum} ₽")
         
-        # Списания (товары)
-        if op_type == "Списание" and op_sum > 0 and op_name:
+        # Списания (товары) - тип "minus"
+        if op_type == "minus" and op_sum > 0 and op_name:
             # Очищаем название от лишнего
             clean_name = op_name.strip()
             if len(clean_name) > 2:
                 products[clean_name] += op_sum
+                logger.debug(f"Товар: {clean_name} на {op_sum} ₽")
         
-        # Подсчет сессий (по ключевым словам)
-        if "сессия" in op_name.lower() or "session" in op_name.lower():
+        # Подсчет сессий (по ключевым словам в названии)
+        name_lower = op_name.lower()
+        if "сессия" in name_lower or "session" in name_lower or "запуск" in name_lower:
             sessions_count += 1
         
-        # Уникальные гости
-        if op_name and len(op_name) > 3 and op_type != "Пополнение":
-            unique_guests.add(op_name[:40])
+        # Уникальные гости (по имени в операции)
+        if op_name and len(op_name) > 3 and op_type != "plus":
+            unique_guests.add(op_name[:50])
     
     # Топ товаров (по общей выручке)
     top_products = sorted(products.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -185,7 +186,10 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
     days_count = max((date_to - date_from).days + 1, 1)
     avg_daily = total_income / days_count if days_count > 0 else 0
     
-    logger.info(f"Выручка: {total_income:.0f}, Сессии: {sessions_count}, Товаров: {len(products)}")
+    logger.info(f"Выручка: {total_income:.0f} ₽")
+    logger.info(f"Сессии: {sessions_count}")
+    logger.info(f"Товаров: {len(products)}")
+    logger.info(f"Топ товаров: {top_products[:3]}")
     
     return {
         "date_from": date_from,
@@ -215,7 +219,7 @@ def format_report(stats: Dict) -> str:
     
     # Простая динамика
     income_diff = 0
-    if stats['avg_daily'] > 0:
+    if stats['avg_daily'] > 0 and stats['avg_daily'] > 0:
         income_diff = 15.5  # пример
     
     result = f"""📊 *RAW DATA {stats['club_name']}*
@@ -230,6 +234,7 @@ def format_report(stats: Dict) -> str:
 
 🏆 *Топ тарифов:*\n"""
     
+    # Тарифы - можно добавить позже
     result += "• Нет данных\n"
     
     result += f"""
@@ -337,9 +342,13 @@ async def test_api(message: types.Message):
     
     if result.get("status"):
         data_count = len(result.get("data", []))
+        # Проверяем типы операций
+        sample = result.get("data", [])[:3]
+        types = [item.get("type") for item in sample]
         await message.answer(
             f"✅ *API РАБОТАЕТ!*\n\n"
-            f"📊 Найдено операций за 7 дней: {data_count}\n\n"
+            f"📊 Найдено операций за 7 дней: {data_count}\n"
+            f"📋 Типы операций: {', '.join(types) if types else 'нет'}\n\n"
             f"Нажмите «📊 За сегодня» для отчета",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
