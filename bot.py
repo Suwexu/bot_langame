@@ -171,13 +171,22 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     income_by_type = defaultdict(float)
     refund_by_type = defaultdict(float)
     
+    # Для отладки - список всех пополнений
+    all_income_operations = []
+    
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
         op_name = item.get("name", "").lower()
         original_name = item.get("name", "")
         op_source = item.get("source", "")
+        op_cancel = item.get("cancel", 0)
         club_name = item.get("club_name", club_name)
+        
+        # Пропускаем отмененные операции
+        if op_cancel == 1:
+            logger.debug(f"Пропущена отмененная операция: {original_name[:50]}")
+            continue
         
         # ПОПОЛНЕНИЯ (ВЫРУЧКА) - поддерживаем все форматы
         is_income = False
@@ -194,14 +203,18 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         
         if is_income:
             total_income += op_sum
-            logger.debug(f"Пополнение: +{op_sum} ₽ | тип={op_type} | источник={op_source} | название={original_name[:50]}")
+            all_income_operations.append({
+                "sum": op_sum,
+                "type": op_type,
+                "source": op_source,
+                "name": original_name[:50]
+            })
         
         # ВОЗВРАТЫ
         if "возврат" in op_name or "refund" in op_name:
             refund_amount = abs(op_sum)
             total_refund += refund_amount
             refund_by_type[op_type] += refund_amount
-            logger.debug(f"Возврат: {refund_amount} ₽ | тип={op_type} | название={original_name[:50]}")
         
         # ПОДСЧЕТ СЕССИЙ
         if "сессия" in op_name or "session" in op_name or "запуск" in op_name:
@@ -237,6 +250,14 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     logger.info(f"  Гости: {len(unique_guests)}")
     logger.info("=" * 60)
     
+    # ВЫВОДИМ ВСЕ ПОПОЛНЕНИЯ ДЛЯ ОТЛАДКИ
+    if all_income_operations:
+        logger.info("📋 СПИСОК ВСЕХ ПОПОЛНЕНИЙ:")
+        for inc in all_income_operations:
+            logger.info(f"  +{inc['sum']:,.0f} ₽ | тип={inc['type']} | источник={inc['source']} | {inc['name']}")
+    else:
+        logger.info("📋 Нет пополнений за этот период")
+    
     return {
         "total_income": net_income,
         "total_income_gross": total_income,
@@ -248,7 +269,8 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         "unique_guests": len(unique_guests),
         "avg_daily": avg_daily,
         "club_name": club_name,
-        "raw_operations": len(operations_data)
+        "raw_operations": len(operations_data),
+        "all_income_operations": all_income_operations
     }
 
 # ========== ФОРМАТИРОВАНИЕ ОТЧЕТОВ ==========
