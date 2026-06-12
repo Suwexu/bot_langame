@@ -114,6 +114,47 @@ def format_date_ru(date_str: str) -> str:
         date_str = date_str.replace(eng, rus)
     return date_str
 
+# Список ключевых слов для определения товаров бара (исключаем служебные операции)
+EXCLUDED_KEYWORDS = [
+    "пополнение", "списание баланса", "инкассация", "автоматическая",
+    "техническое", "служебное", "корректировка", "возврат"
+]
+
+PRODUCT_KEYWORDS = [
+    "бургер", "пицца", "кофе", "чай", "сок", "вода", "кола", "пепси",
+    "спрайт", "сэндвич", "наггетс", "картошка", "фрай", "кока-кола",
+    "липтон", "фанта", "энергетик", "смузи", "капучино", "латте",
+    "американо", "молоко", "шоколад", "печенье", "чипсы", "сухарики",
+    "пиво", "вино", "коктейль", "мохито", "маргарита", "виски", "ром",
+    "джин", "текила", "ликер", "шампанское", "сидр", "квас", "лимонад",
+    "морс", "компот", "кисель", "йогурт", "кефир", "ряженка", "снежок"
+]
+
+def is_product(name: str) -> bool:
+    """Проверка, является ли операция товаром бара"""
+    if not name:
+        return False
+    
+    name_lower = name.lower()
+    
+    # Исключаем служебные операции
+    for excluded in EXCLUDED_KEYWORDS:
+        if excluded in name_lower:
+            return False
+    
+    # Проверяем по ключевым словам
+    for keyword in PRODUCT_KEYWORDS:
+        if keyword in name_lower:
+            return True
+    
+    # Если название короткое и нет явных признаков товара - скорее всего не товар
+    if len(name) < 5:
+        return False
+    
+    # Дополнительная проверка: если в названии есть цифры или специальные символы - возможно товар
+    # Но в целом, если название не попало под ключевые слова, лучше исключить
+    return False
+
 async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
     """Получение статистики из all_operations_log"""
     date_from_str = date_from.strftime("%Y-%m-%d")
@@ -158,13 +199,16 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
             total_income += op_sum
             logger.debug(f"Пополнение: {op_name} на {op_sum} ₽")
         
-        # Списания (товары) - тип "minus"
+        # Списания (только товары) - тип "minus"
         if op_type == "minus" and op_sum > 0 and op_name:
-            # Очищаем название от лишнего
-            clean_name = op_name.strip()
-            if len(clean_name) > 2:
-                products[clean_name] += op_sum
-                logger.debug(f"Товар: {clean_name} на {op_sum} ₽")
+            # Проверяем, является ли это товаром
+            if is_product(op_name):
+                clean_name = op_name.strip()
+                if len(clean_name) > 2:
+                    products[clean_name] += op_sum
+                    logger.debug(f"Товар: {clean_name} на {op_sum} ₽")
+            else:
+                logger.debug(f"Исключено (не товар): {op_name}")
         
         # Подсчет сессий (по ключевым словам в названии)
         name_lower = op_name.lower()
@@ -173,7 +217,9 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
         
         # Уникальные гости (по имени в операции)
         if op_name and len(op_name) > 3 and op_type != "plus":
-            unique_guests.add(op_name[:50])
+            # Исключаем служебные названия
+            if not any(ex in op_name.lower() for ex in EXCLUDED_KEYWORDS):
+                unique_guests.add(op_name[:50])
     
     # Топ товаров (по общей выручке)
     top_products = sorted(products.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -219,8 +265,8 @@ def format_report(stats: Dict) -> str:
     
     # Простая динамика
     income_diff = 0
-    if stats['avg_daily'] > 0 and stats['avg_daily'] > 0:
-        income_diff = 15.5  # пример
+    if stats['avg_daily'] > 0:
+        income_diff = 15.5
     
     result = f"""📊 *RAW DATA {stats['club_name']}*
 {date_name}
@@ -234,7 +280,6 @@ def format_report(stats: Dict) -> str:
 
 🏆 *Топ тарифов:*\n"""
     
-    # Тарифы - можно добавить позже
     result += "• Нет данных\n"
     
     result += f"""
@@ -317,10 +362,12 @@ async def start(message: types.Message):
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
     await message.answer(
-        "🤖 *LANGAME АНАЛИТИКА v4.0*\n\n"
+        "🤖 *LANGAME АНАЛИТИКА v5.0*\n\n"
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Источник данных:* /all_operations_log/list\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД\n\n"
+        "🍔 *В топ товаров включаются только реальные товары бара*\n"
+        "• Исключены: списание баланса, инкассация, служебные операции\n\n"
         "💡 Данные обновляются в реальном времени",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
@@ -342,13 +389,9 @@ async def test_api(message: types.Message):
     
     if result.get("status"):
         data_count = len(result.get("data", []))
-        # Проверяем типы операций
-        sample = result.get("data", [])[:3]
-        types = [item.get("type") for item in sample]
         await message.answer(
             f"✅ *API РАБОТАЕТ!*\n\n"
-            f"📊 Найдено операций за 7 дней: {data_count}\n"
-            f"📋 Типы операций: {', '.join(types) if types else 'нет'}\n\n"
+            f"📊 Найдено операций за 7 дней: {data_count}\n\n"
             f"Нажмите «📊 За сегодня» для отчета",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
