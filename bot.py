@@ -2,18 +2,15 @@ import os
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, Optional
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton
-)
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,25 +19,26 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("LANGAME_API_KEY")
 API_BASE_URL = "https://cyberx302.langame.ru/public_api"
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+# Настройка логирования
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не указан!")
+    raise ValueError("BOT_TOKEN не указан в переменных окружения!")
 
-# ========== СОСТОЯНИЯ ==========
-class GuestSearchState(StatesGroup):
-    waiting_for_search_input = State()
+if not API_KEY:
+    logger.warning("LANGAME_API_KEY не указан! Функции API не будут работать.")
 
-class SessionsState(StatesGroup):
-    waiting_for_guest_id = State()
+# ========== СОСТОЯНИЯ ДЛЯ FSM ==========
+class DateFilterState(StatesGroup):
+    waiting_for_date_from = State()
+    waiting_for_date_to = State()
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
+# ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -55,192 +53,234 @@ class LangameAPI:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
-        self.connection_status = None
-        self.last_error = None
+        logger.info(f"API Client initialized with base URL: {base_url}")
     
-    async def test_connection(self) -> Dict:
-        """Тестирование подключения к API через /all_operations_log/list"""
-        logger.info("Testing API connection...")
-        
-        if not self.api_key or self.api_key == "MISSING_API_KEY":
-            self.connection_status = False
-            return {"success": False, "error": "API ключ не настроен"}
-        
-        # Тестируем эндпоинт /all_operations_log/list (как в вашем примере)
-        test_endpoints = [
-            "/all_operations_log/list",
-            "/clubs/list", 
-            "/guests/list"
-        ]
-        
-        for endpoint in test_endpoints:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        f"{self.base_url}{endpoint}",
-                        headers=self.headers,
-                        timeout=10
-                    ) as resp:
-                        logger.info(f"Test {endpoint} - status: {resp.status}")
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if data.get("status"):
-                                self.connection_status = True
-                                return {"success": True, "working_endpoint": endpoint}
-            except Exception as e:
-                logger.warning(f"Endpoint {endpoint} failed: {e}")
-                continue
-        
-        self.connection_status = False
-        return {"success": False, "error": "Ни один из эндпоинтов не ответил успешно. Проверьте API ключ."}
-    
-    async def request(self, endpoint: str, method: str = "GET", data: Dict = None) -> Dict:
-        """Выполнение запроса к API"""
+    async def request(self, endpoint: str, params: Dict = None, timeout: int = 90) -> Dict:
+        """Универсальный метод для GET запросов с таймаутом"""
         url = f"{self.base_url}{endpoint}"
-        
-        logger.info(f"API Request: {method} {url}")
+        logger.info(f"API Request: GET {url}")
+        if params:
+            logger.debug(f"Request params: {params}")
         
         async with aiohttp.ClientSession() as session:
             try:
-                if method.upper() == "GET":
-                    async with session.get(url, headers=self.headers, params=data, timeout=30) as resp:
-                        logger.info(f"Response status: {resp.status}")
-                        if resp.status == 200:
-                            return await resp.json()
-                        else:
-                            return {"status": False, "error": f"HTTP {resp.status}"}
-                else:
-                    async with session.post(url, headers=self.headers, json=data, timeout=30) as resp:
-                        logger.info(f"Response status: {resp.status}")
-                        if resp.status == 200:
-                            return await resp.json()
-                        else:
-                            return {"status": False, "error": f"HTTP {resp.status}"}
+                async with session.get(url, headers=self.headers, params=params, timeout=timeout) as resp:
+                    logger.info(f"Response status: {resp.status}")
+                    if resp.status == 200:
+                        result = await resp.json()
+                        logger.debug(f"Response data: {str(result)[:200]}...")
+                        return result
+                    elif resp.status == 403:
+                        return {"status": False, "error": "Доступ запрещен (403). Проверьте API ключ."}
+                    elif resp.status == 404:
+                        return {"status": False, "error": f"Эндпоинт {endpoint} не найден (404)"}
+                    else:
+                        return {"status": False, "error": f"HTTP {resp.status}"}
             except asyncio.TimeoutError:
-                return {"status": False, "error": "Request timeout"}
+                logger.error(f"Timeout {timeout}s on {endpoint}")
+                return {"status": False, "error": f"Сервер не ответил за {timeout} секунд. Попробуйте позже."}
+            except aiohttp.ClientError as e:
+                logger.error(f"Client error: {e}")
+                return {"status": False, "error": f"Ошибка подключения: {str(e)}"}
             except Exception as e:
+                logger.error(f"API error: {e}")
                 return {"status": False, "error": str(e)}
     
-    async def get_clubs(self) -> Dict:
-        return await self.request("/clubs/list")
+    async def test_connection(self) -> Dict:
+        """Быстрая проверка подключения (5 секунд)"""
+        if not self.api_key or self.api_key == "MISSING_API_KEY":
+            return {"success": False, "error": "API ключ не настроен"}
+        
+        result = await self.request("/all_operations_log/list", timeout=10)
+        if result.get("status"):
+            return {"success": True, "working_endpoint": "/all_operations_log/list"}
+        else:
+            return {"success": False, "error": result.get("error", "Неизвестная ошибка")}
     
-    async def get_balances(self, page: int = 1, limit: int = 20) -> Dict:
-        return await self.request("/guests/balance", data={"page": page, "page_limit": limit})
-    
-    async def get_bonus_balances(self, page: int = 1, limit: int = 20) -> Dict:
-        return await self.request("/guests/bonus_balance", data={"page": page, "page_limit": limit})
-    
-    async def get_transactions(self, date_from: str, date_to: str, page: int = 1, limit: int = 20) -> Dict:
-        return await self.request(
-            "/transactions/list",
-            data={"page": page, "page_limit": limit, "date_from": date_from, "date_to": date_to}
-        )
-    
-    async def search_guest(self, search_data: Dict) -> Dict:
-        return await self.request("/guests/search", method="POST", data=search_data)
-    
-    async def get_guest_sessions(self, guest_id: int, page: int = 1, limit: int = 10) -> Dict:
-        return await self.request(
-            "/guests/sessions",
-            data={"guest_id": guest_id, "page": page, "page_limit": limit}
-        )
-    
-    async def get_pc_list(self) -> Dict:
-        return await self.request("/global/linking_pc_by_type/list")
-    
-    async def get_operations_log(self, date_from: str = None, date_to: str = None) -> Dict:
+    async def get_operations_log(self, date_from: str = None, date_to: str = None,
+                                  operation_type: str = None, operation_source: str = None,
+                                  sum_from: float = None, sum_to: float = None,
+                                  club_id: int = None) -> Dict:
         """Получить лог операций - /all_operations_log/list"""
         params = {}
         if date_from:
             params["date_from"] = date_from
         if date_to:
             params["date_to"] = date_to
-        return await self.request("/all_operations_log/list", data=params)
+        if operation_type:
+            params["operation_type"] = operation_type
+        if operation_source:
+            params["operation_source"] = operation_source
+        if sum_from:
+            params["sum_from"] = sum_from
+        if sum_to:
+            params["sum_to"] = sum_to
+        if club_id:
+            params["club_id"] = club_id
+        
+        return await self.request("/all_operations_log/list", params=params, timeout=90)
+    
+    async def get_transactions(self, date_from: str = None, date_to: str = None,
+                                page: int = 1, limit: int = 20,
+                                tx_type: int = None, pay_system: int = None) -> Dict:
+        """Получить транзакции - /transactions/list"""
+        params = {"page": page, "page_limit": limit}
+        if date_from:
+            params["date_from"] = date_from
+        if date_to:
+            params["date_to"] = date_to
+        if tx_type:
+            params["type"] = tx_type
+        if pay_system:
+            params["pay_system"] = pay_system
+        
+        return await self.request("/transactions/list", params=params, timeout=90)
+    
+    async def get_balances_list(self, date_from: str, date_to: str,
+                                 page: int = 1, limit: int = 20) -> Dict:
+        """Получить список пополнений баланса - /balances/list"""
+        params = {
+            "page": page,
+            "page_limit": limit,
+            "date_from": date_from,
+            "date_to": date_to
+        }
+        return await self.request("/balances/list", params=params, timeout=90)
+    
+    async def get_guests_balance(self, page: int = 1, limit: int = 20) -> Dict:
+        """Получить балансы гостей - /guests/balance"""
+        return await self.request("/guests/balance", params={"page": page, "page_limit": limit}, timeout=90)
+    
+    async def get_bonus_balance(self, page: int = 1, limit: int = 20) -> Dict:
+        """Получить бонусные балансы - /guests/bonus_balance"""
+        return await self.request("/guests/bonus_balance", params={"page": page, "page_limit": limit}, timeout=90)
+    
+    async def get_clubs(self) -> Dict:
+        """Получить список клубов - /clubs/list"""
+        return await self.request("/clubs/list", timeout=30)
+    
+    async def get_working_shifts(self, page: int = 1, limit: int = 20) -> Dict:
+        """Получить список смен - /working_shifts/list"""
+        return await self.request("/working_shifts/list", params={"page": page, "page_limit": limit}, timeout=60)
 
+# Создаем экземпляр API клиента
 api = LangameAPI(API_KEY if API_KEY else "MISSING_API_KEY", API_BASE_URL)
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard() -> ReplyKeyboardMarkup:
+    """Главная клавиатура"""
     buttons = [
         [KeyboardButton(text="🔌 Проверить API")],
-        [KeyboardButton(text="🏢 Клубы")],
-        [KeyboardButton(text="💰 Балансы"), KeyboardButton(text="🎁 Бонусы")],
-        [KeyboardButton(text="💸 Транзакции"), KeyboardButton(text="📋 Лог операций")],
-        [KeyboardButton(text="👤 Поиск гостя"), KeyboardButton(text="🎮 Сессии")],
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="ℹ️ О боте")]
+        [KeyboardButton(text="📋 Лог операций"), KeyboardButton(text="💸 Транзакции")],
+        [KeyboardButton(text="💰 Балансы гостей"), KeyboardButton(text="🎁 Бонусы гостей")],
+        [KeyboardButton(text="🏢 Клубы"), KeyboardButton(text="📊 Смены")],
+        [KeyboardButton(text="📈 Статистика"), KeyboardButton(text="ℹ️ О боте")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def get_back_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура с кнопкой назад"""
     buttons = [[KeyboardButton(text="◀️ Назад")]]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def get_search_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="По телефону", callback_data="search_phone")],
-            [InlineKeyboardButton(text="По ID", callback_data="search_id")],
-            [InlineKeyboardButton(text="По ФИО", callback_data="search_name")]
-        ]
-    )
-
 # ========== ФОРМАТТЕРЫ ==========
-def format_clubs(data: Dict) -> str:
-    if not data.get("status"):
-        return f"❌ Ошибка: {data.get('error', 'Unknown error')}"
-    
-    clubs = data.get("data", [])
-    if not clubs:
-        return "🏢 Клубы не найдены"
-    
-    result = "🏢 СПИСОК КЛУБОВ\n\n"
-    for club in clubs[:15]:
-        status_icon = "🟢" if club.get("active") else "🔴"
-        name = club.get('name', 'Без названия')
-        club_id = club.get('id')
-        address = club.get('address')
-        result += f"{status_icon} {name} (ID: {club_id})\n"
-        if address:
-            result += f"   📍 {address}\n"
-        result += "\n"
-    
-    result += f"\n📊 Всего клубов: {len(clubs)}"
-    return result
+def format_test_result(result: Dict) -> str:
+    """Форматирование результата проверки API"""
+    if result.get("success"):
+        return f"""✅ API ПОДКЛЮЧЕНИЕ УСПЕШНО!
 
-def format_balances(data: Dict) -> str:
-    if not data.get("status"):
-        return f"❌ Ошибка: {data.get('error', 'Unknown error')}"
-    
-    balances = data.get("data", [])
-    if not balances:
-        return "📭 Балансы не найдены"
-    
-    result = "💰 БАЛАНСЫ ГОСТЕЙ\n\n"
-    total = 0
-    for item in balances[:15]:
-        balance = float(item.get('balance', 0))
-        total += balance
-        result += f"• Гость #{item.get('guest_id')}: {balance:,.2f} ₽\n"
-    
-    if len(balances) > 15:
-        result += f"\n📊 Показано 15 из {len(balances)} записей"
+📊 Статус: Работает
+🔑 API Key: Настроен
+✅ Работает эндпоинт: {result.get('working_endpoint')}
+🌐 API URL: {API_BASE_URL}
+
+🎉 Бот готов к работе!"""
     else:
-        result += f"\n📊 Всего записей: {len(balances)}"
+        return f"""❌ ОШИБКА ПОДКЛЮЧЕНИЯ К API
+
+🔴 Статус: Не работает
+🔑 API Key: {'Настроен' if API_KEY else 'Не настроен'}
+❌ Ошибка: {result.get('error')}
+
+💡 Решение:
+1. Проверьте API ключ в настройках Railway
+2. Убедитесь, что ключ действителен
+3. Обратитесь к администратору LANGAME"""
+
+def format_operations_log(data: Dict, filter_desc: str = "") -> str:
+    """Форматирование лога операций"""
+    if not data.get("status"):
+        return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
     
-    result += f"\n💰 Общая сумма: {total:,.2f} ₽"
+    operations = data.get("data", [])
+    if not operations:
+        return f"📭 Операции не найдены{f' ({filter_desc})' if filter_desc else ''}"
+    
+    result = f"📋 ЛОГ ОПЕРАЦИЙ{f' - {filter_desc}' if filter_desc else ''}\n\n"
+    
+    total_income = 0
+    total_expense = 0
+    income_count = 0
+    expense_count = 0
+    
+    for op in operations[:20]:
+        date_normal = op.get('date_normal', 'N/A')
+        if date_normal and date_normal != 'N/A':
+            date_normal = date_normal[:16]
+        
+        op_type = op.get('type', 'Unknown')
+        op_name = op.get('name', '')
+        op_sum = op.get('sum', 0)
+        op_source = op.get('source', '')
+        op_form = op.get('form', '')
+        club_name = op.get('club_name', '')
+        
+        if op_sum and op_sum > 0:
+            if op_type == "Пополнение":
+                total_income += op_sum
+                income_count += 1
+            elif op_type == "Списание":
+                total_expense += abs(op_sum)
+                expense_count += 1
+        
+        type_icon = "💰" if op_type == "Пополнение" else "💸"
+        result += f"{type_icon} {date_normal}\n"
+        if club_name:
+            result += f"   📍 {club_name}\n"
+        result += f"   📋 {op_type}\n"
+        if op_name:
+            result += f"   📝 {op_name[:50]}\n"
+        if op_sum:
+            result += f"   💵 {op_sum:,.2f} ₽\n"
+        if op_source:
+            result += f"   🔹 Источник: {op_source}\n"
+        if op_form:
+            result += f"   🔸 Форма: {op_form}\n"
+        result += "─" * 25 + "\n"
+    
+    result += f"\n📊 ИТОГИ:\n"
+    result += f"💰 Пополнения: {total_income:,.2f} ₽ ({income_count} оп.)\n"
+    result += f"💸 Списания: {total_expense:,.2f} ₽ ({expense_count} оп.)\n"
+    result += f"📈 Сальдо: {total_income - total_expense:,.2f} ₽"
+    
+    if len(operations) > 20:
+        result += f"\n\n📊 Показано 20 из {len(operations)} записей"
+    
     return result
 
-def format_transactions(data: Dict) -> str:
+def format_transactions(data: Dict, filter_desc: str = "") -> str:
+    """Форматирование транзакций"""
     if not data.get("status"):
-        return f"❌ Ошибка: {data.get('error', 'Unknown error')}"
+        return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
     
     transactions = data.get("data", [])
     if not transactions:
-        return "📭 Транзакции не найдены"
+        return f"📭 Транзакции не найдены{f' ({filter_desc})' if filter_desc else ''}"
     
-    result = "💸 ПОСЛЕДНИЕ ТРАНЗАКЦИИ\n\n"
+    result = f"💸 ТРАНЗАКЦИИ{f' - {filter_desc}' if filter_desc else ''}\n\n"
     total = 0
-    for tx in transactions[:10]:
+    
+    for tx in transactions[:15]:
         date = tx.get('date_update', 'N/A')[:16]
         amount = float(tx.get('balance', 0))
         if amount > 0:
@@ -249,47 +289,102 @@ def format_transactions(data: Dict) -> str:
         result += f"📅 {date}\n"
         result += f"💰 {sign}{amount:,.2f} ₽\n"
         if tx.get('comment'):
-            comment = tx.get('comment')[:50]
-            result += f"📝 {comment}\n"
+            result += f"📝 {tx.get('comment')[:50]}\n"
         result += "─" * 25 + "\n"
     
     result += f"\n💰 Общая сумма пополнений: {total:,.2f} ₽"
+    
+    if len(transactions) > 15:
+        result += f"\n📊 Показано 15 из {len(transactions)} записей"
+    
     return result
 
-def format_operations_log(data: Dict) -> str:
-    """Форматирование лога операций"""
+def format_balances(data: Dict, title: str = "БАЛАНСЫ ГОСТЕЙ", currency: str = "₽") -> str:
+    """Форматирование балансов"""
     if not data.get("status"):
-        return f"❌ Ошибка: {data.get('error', 'Unknown error')}"
+        return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
     
-    operations = data.get("data", [])
-    if not operations:
-        return "📭 Операции не найдены"
+    balances = data.get("data", [])
+    if not balances:
+        return f"📭 {title} не найдены"
     
-    result = "📋 ЛОГ ОПЕРАЦИЙ\n\n"
-    for op in operations[:10]:
-        date = op.get('date_normal', 'N/A')[:16] if op.get('date_normal') else 'N/A'
-        op_type = op.get('type', 'Unknown')
-        op_name = op.get('name', '')
-        op_sum = op.get('sum', 0)
-        op_source = op.get('source', '')
-        
-        type_icon = "💰" if op_type == "Пополнение" else "💸"
-        result += f"{type_icon} {date}\n"
-        result += f"   Тип: {op_type}\n"
-        if op_name:
-            result += f"   Название: {op_name}\n"
-        if op_sum:
-            result += f"   Сумма: {op_sum:,.2f} ₽\n"
-        if op_source:
-            result += f"   Источник: {op_source}\n"
+    result = f"💰 {title}\n\n"
+    total = 0
+    for item in balances[:20]:
+        if "bonus_balance" in item:
+            balance = float(item.get('bonus_balance', 0))
+            guest_id = item.get('guest_id')
+            result += f"• Гость #{guest_id}: {balance:,.0f} {currency}\n"
+            total += balance
+        else:
+            balance = float(item.get('balance', 0))
+            guest_id = item.get('guest_id')
+            result += f"• Гость #{guest_id}: {balance:,.2f} {currency}\n"
+            total += balance
+    
+    if len(balances) > 20:
+        result += f"\n📊 Показано 20 из {len(balances)} записей"
+    else:
+        result += f"\n📊 Всего записей: {len(balances)}"
+    
+    result += f"\n💰 Общая сумма: {total:,.2f} {currency}"
+    return result
+
+def format_clubs(data: Dict) -> str:
+    """Форматирование списка клубов"""
+    if not data.get("status"):
+        return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
+    
+    clubs = data.get("data", [])
+    if not clubs:
+        return "🏢 Клубы не найдены"
+    
+    result = "🏢 СПИСОК КЛУБОВ\n\n"
+    for club in clubs:
+        status_icon = "🟢" if club.get("active") else "🔴"
+        name = club.get('name', 'Без названия')
+        club_id = club.get('id')
+        address = club.get('address', '')
+        result += f"{status_icon} {name} (ID: {club_id})\n"
+        if address:
+            result += f"   📍 {address}\n"
+        result += "\n"
+    
+    result += f"\n📊 Всего клубов: {len(clubs)}"
+    return result
+
+def format_working_shifts(data: Dict) -> str:
+    """Форматирование списка смен"""
+    if not data.get("status"):
+        return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
+    
+    shifts = data.get("data", [])
+    if not shifts:
+        return "📭 Смены не найдены"
+    
+    result = "📊 СПИСОК СМЕН\n\n"
+    for shift in shifts[:10]:
+        result += f"🆔 Смена #{shift.get('id')}\n"
+        result += f"📅 Открыта: {shift.get('date_start', 'N/A')[:16] if shift.get('date_start') else 'N/A'}\n"
+        if shift.get('date_stop'):
+            result += f"📅 Закрыта: {shift.get('date_stop')[:16]}\n"
+        else:
+            result += f"🟢 Статус: Активна\n"
+        result += f"💰 Наличные: {shift.get('nal', 0):,.2f} ₽\n"
+        result += f"💳 Безналичные: {shift.get('beznal', 0):,.2f} ₽\n"
+        result += f"📱 МП оплата: {shift.get('mobile_pay', 0):,.2f} ₽\n"
+        result += f"💰 Инкассация: {shift.get('incass', 0):,.2f} ₽\n"
+        result += f"📈 Средний чек: {shift.get('middle_check', 0)} ₽\n"
         result += "─" * 25 + "\n"
     
-    if len(operations) > 10:
-        result += f"\n📊 Показано 10 из {len(operations)} записей"
+    if len(shifts) > 10:
+        result += f"\n📊 Показано 10 из {len(shifts)} смен"
+    else:
+        result += f"\n📊 Всего смен: {len(shifts)}"
     
     return result
 
-# ========== ОБРАБОТЧИКИ ==========
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     welcome_text = """🎮 ДОБРО ПОЖАЛОВАТЬ В LANGAME БОТ!
@@ -297,42 +392,35 @@ async def cmd_start(message: types.Message):
 Я помогаю управлять игровым клубом через API LANGAME.
 
 📋 Доступные функции:
-• 🔌 Проверить API - тест подключения
-• 🏢 Список клубов
-• 💰 Балансы гостей
-• 🎁 Бонусные балансы
-• 💸 История транзакций
-• 📋 Лог операций
-• 👤 Поиск гостей
-• 🎮 Игровые сессии
-• 📊 Финансовая статистика
-
-🔧 ПЕРВЫЙ ШАГ:
-Нажмите кнопку "🔌 Проверить API" для диагностики
+• 🔌 Проверить API - диагностика подключения
+• 📋 Лог операций - все финансовые операции
+• 💸 Транзакции - история операций с деньгами
+• 💰 Балансы гостей - денежные балансы
+• 🎁 Бонусы гостей - бонусные баллы
+• 🏢 Клубы - список всех клубов
+• 📊 Смены - история кассовых смен
+• 📈 Статистика - финансовая аналитика
 
 Используйте кнопки ниже 👇"""
     
     await message.answer(welcome_text, reply_markup=get_main_keyboard())
-    logger.info(f"User {message.from_user.id} started")
+    logger.info(f"User {message.from_user.id} started the bot")
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     help_text = """❓ ПОМОЩЬ
 
-🔌 Проверить API - Тест подключения
+🔌 Проверить API - Тест подключения к API
+📋 Лог операций - Все операции (пополнения/списания) за 30 дней
+💸 Транзакции - История операций с деньгами за 30 дней
+💰 Балансы гостей - Текущие денежные балансы
+🎁 Бонусы гостей - Текущие бонусные баллы
 🏢 Клубы - Список всех клубов
-💰 Балансы - Денежные балансы гостей
-🎁 Бонусы - Бонусные балансы
-💸 Транзакции - История операций за 7 дней
-📋 Лог операций - Все операции (пополнения/списания)
-👤 Поиск гостя - Поиск по телефону/ID/ФИО
-🎮 Сессии - История игровых сессий
-📊 Статистика - Финансовая аналитика
+📊 Смены - История кассовых смен
+📈 Статистика - Финансовая аналитика
 
-🔧 НАСТРОЙКА:
-1. Добавьте LANGAME_API_KEY в Railway
-2. Нажмите "🔌 Проверить API"
-3. Если всё работает - пользуйтесь!"""
+⏱️ Некоторые запросы могут выполняться до 90 секунд.
+Пожалуйста, подождите после нажатия кнопки."""
     
     await message.answer(help_text)
 
@@ -343,39 +431,13 @@ async def back_to_main(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api_connection(message: types.Message):
-    msg = await message.answer("🔄 Проверка подключения к API...\n\nТестирую несколько эндпоинтов...")
+    msg = await message.answer("🔄 Проверка подключения к API...")
     
     result = await api.test_connection()
-    
-    if result["success"]:
-        working_endpoint = result.get("working_endpoint", "unknown")
-        response_text = f"""✅ API ПОДКЛЮЧЕНИЕ УСПЕШНО!
-
-📊 Статус: Работает
-🔑 API Key: Настроен
-✅ Работает эндпоинт: {working_endpoint}
-🌐 API URL: {API_BASE_URL}
-
-🎉 Бот готов к работе! Используйте остальные кнопки меню."""
-    else:
-        response_text = f"""❌ ОШИБКА ПОДКЛЮЧЕНИЯ К API
-
-🔴 Статус: Не работает
-🔑 API Key: {'Не настроен' if not API_KEY else 'Настроен'}
-❌ Ошибка: {result['error']}
-
-💡 ВОЗМОЖНЫЕ ПРИЧИНЫ:
-1. Неверный API ключ
-2. У ключа нет доступа к API
-3. Проблемы с сервером LANGAME
-
-📝 Решение: 
-• Проверьте API ключ в настройках Railway
-• Убедитесь, что ключ действителен
-• Обратитесь к администратору LANGAME"""
+    response_text = format_test_result(result)
     
     await msg.edit_text(response_text)
-    logger.info(f"API test result: {result['success']}")
+    logger.info(f"API test result for user {message.from_user.id}: {result['success']}")
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about_bot(message: types.Message):
@@ -383,225 +445,115 @@ async def about_bot(message: types.Message):
     
     about_text = f"""🤖 О БОТЕ LANGAME
 
-Версия: 1.4.0
+Версия: 2.0.0
 Платформа: Railway
 
 📌 СТАТУС API:
 • Ключ: {api_status}
 • URL: {API_BASE_URL}
 
+⏱️ Таймаут запросов: 90 секунд
+
 💡 ПЕРВЫЙ ЗАПУСК:
 Нажмите кнопку "🔌 Проверить API"
 
-⚠️ Если функции не работают:
-1. Нажмите "🔌 Проверить API"
-2. Следуйте инструкциям из результата проверки"""
+⚠️ Если данные не загружаются:
+• Проверьте интернет-соединение
+• Попробуйте позже, когда сервер LANGAME менее загружен"""
     
     await message.answer(about_text)
+
+@dp.message(F.text == "📋 Лог операций")
+async def show_operations_log(message: types.Message):
+    msg = await message.answer("🔄 Загрузка лога операций за 30 дней...\n⏱️ Это может занять до 90 секунд...", reply_markup=get_back_keyboard())
     
     if not API_KEY:
-        await message.answer("⚠️ ВНИМАНИЕ! API ключ LANGAME не настроен.\n\nНажмите кнопку '🔌 Проверить API' для получения инструкций.")
+        await msg.edit_text("❌ API ключ не настроен!\n\nНажмите '🔌 Проверить API' для получения инструкций.")
+        return
+    
+    date_to = datetime.now().strftime("%Y-%m-%d")
+    date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    
+    response = await api.get_operations_log(date_from, date_to)
+    result = format_operations_log(response, "30 дней")
+    
+    await msg.edit_text(result)
+
+@dp.message(F.text == "💸 Транзакции")
+async def show_transactions(message: types.Message):
+    msg = await message.answer("🔄 Загрузка транзакций за 30 дней...\n⏱️ Это может занять до 90 секунд...", reply_markup=get_back_keyboard())
+    
+    if not API_KEY:
+        await msg.edit_text("❌ API ключ не настроен!")
+        return
+    
+    date_to = datetime.now().strftime("%Y-%m-%d")
+    date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    
+    response = await api.get_transactions(date_from, date_to)
+    result = format_transactions(response, "30 дней")
+    
+    await msg.edit_text(result)
+
+@dp.message(F.text == "💰 Балансы гостей")
+async def show_balances(message: types.Message):
+    msg = await message.answer("🔄 Загрузка балансов гостей...\n⏱️ Это может занять до 90 секунд...", reply_markup=get_back_keyboard())
+    
+    if not API_KEY:
+        await msg.edit_text("❌ API ключ не настроен!")
+        return
+    
+    response = await api.get_guests_balance()
+    result = format_balances(response, "БАЛАНСЫ ГОСТЕЙ", "₽")
+    
+    await msg.edit_text(result)
+
+@dp.message(F.text == "🎁 Бонусы гостей")
+async def show_bonus_balances(message: types.Message):
+    msg = await message.answer("🔄 Загрузка бонусных балансов...\n⏱️ Это может занять до 90 секунд...", reply_markup=get_back_keyboard())
+    
+    if not API_KEY:
+        await msg.edit_text("❌ API ключ не настроен!")
+        return
+    
+    response = await api.get_bonus_balance()
+    result = format_balances(response, "БОНУСНЫЕ БАЛАНСЫ", "бонусов")
+    
+    await msg.edit_text(result)
 
 @dp.message(F.text == "🏢 Клубы")
 async def show_clubs(message: types.Message):
     msg = await message.answer("🔄 Загрузка списка клубов...", reply_markup=get_back_keyboard())
     
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!\n\nНажмите '🔌 Проверить API'")
+        await msg.edit_text("❌ API ключ не настроен!")
         return
     
     response = await api.get_clubs()
     result = format_clubs(response)
+    
     await msg.edit_text(result)
 
-@dp.message(F.text == "💰 Балансы")
-async def show_balances(message: types.Message):
-    msg = await message.answer("🔄 Загрузка балансов гостей...", reply_markup=get_back_keyboard())
+@dp.message(F.text == "📊 Смены")
+async def show_working_shifts(message: types.Message):
+    msg = await message.answer("🔄 Загрузка списка смен...\n⏱️ Это может занять до 60 секунд...", reply_markup=get_back_keyboard())
     
     if not API_KEY:
         await msg.edit_text("❌ API ключ не настроен!")
         return
     
-    response = await api.get_balances()
-    result = format_balances(response)
+    response = await api.get_working_shifts()
+    result = format_working_shifts(response)
+    
     await msg.edit_text(result)
 
-@dp.message(F.text == "🎁 Бонусы")
-async def show_bonus_balances(message: types.Message):
-    msg = await message.answer("🔄 Загрузка бонусных балансов...", reply_markup=get_back_keyboard())
+@dp.message(F.text == "📈 Статистика")
+async def show_statistics(message: types.Message):
+    msg = await message.answer("📊 Сбор статистики за 30 дней...\n⏱️ Это может занять до 90 секунд...")
     
     if not API_KEY:
         await msg.edit_text("❌ API ключ не настроен!")
         return
-    
-    response = await api.get_bonus_balances()
-    if response.get("status") and response.get("data"):
-        result = "🎁 БОНУСНЫЕ БАЛАНСЫ\n\n"
-        total = 0
-        for item in response["data"][:15]:
-            bonus = float(item.get('bonus_balance', 0))
-            total += bonus
-            result += f"• Гость #{item.get('guest_id')}: {bonus:,.0f} бонусов\n"
-        result += f"\n💰 Всего бонусов: {total:,.0f}"
-        await msg.edit_text(result)
-    else:
-        await msg.edit_text(f"❌ Ошибка: {response.get('error', 'Unknown')}")
-
-@dp.message(F.text == "💸 Транзакции")
-async def show_transactions(message: types.Message):
-    msg = await message.answer("🔄 Загрузка транзакций за 7 дней...", reply_markup=get_back_keyboard())
-    
-    if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!")
-        return
-    
-    date_to = datetime.now().strftime("%Y-%m-%d")
-    date_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    
-    response = await api.get_transactions(date_from, date_to)
-    result = format_transactions(response)
-    await msg.edit_text(result)
-
-@dp.message(F.text == "📋 Лог операций")
-async def show_operations_log(message: types.Message):
-    msg = await message.answer("🔄 Загрузка лога операций за 7 дней...", reply_markup=get_back_keyboard())
-    
-    if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!")
-        return
-    
-    date_to = datetime.now().strftime("%Y-%m-%d")
-    date_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    
-    response = await api.get_operations_log(date_from, date_to)
-    result = format_operations_log(response)
-    await msg.edit_text(result)
-
-@dp.message(F.text == "👤 Поиск гостя")
-async def search_guest_prompt(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!\n\nНажмите '🔌 Проверить API'")
-        return
-    
-    await message.answer(
-        "🔍 ПОИСК ГОСТЯ\n\nВыберите способ поиска:",
-        reply_markup=get_search_keyboard()
-    )
-
-@dp.callback_query(lambda c: c.data.startswith("search_"))
-async def process_search_type(callback: types.CallbackQuery, state: FSMContext):
-    search_type = callback.data.replace("search_", "")
-    
-    prompts = {
-        "phone": "📱 Введите номер телефона (например: 9001234567)",
-        "id": "🆔 Введите ID гостя (число)",
-        "name": "📝 Введите ФИО гостя (можно часть)"
-    }
-    
-    await state.update_data(search_type=search_type)
-    await state.set_state(GuestSearchState.waiting_for_search_input)
-    await callback.message.edit_text(prompts[search_type])
-    await callback.answer()
-
-@dp.message(StateFilter(GuestSearchState.waiting_for_search_input))
-async def perform_search(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    search_type = data.get("search_type")
-    query = message.text.strip()
-    
-    msg = await message.answer("🔍 Поиск...")
-    
-    search_payload = {
-        "pagination": {"page": 1, "size": 10},
-        "featues": {"fields": ["guest_id", "fio", "phone"], "balance": True, "bonus_balance": True}
-    }
-    
-    if search_type == "phone":
-        search_payload["filter"] = {"phone": query}
-    elif search_type == "id" and query.isdigit():
-        search_payload["filter"] = {"ids": [int(query)]}
-    elif search_type == "name":
-        search_payload["filter"] = {"query": query}
-    else:
-        await msg.edit_text("❌ Неверный формат. Попробуйте снова")
-        await state.clear()
-        return
-    
-    response = await api.search_guest(search_payload)
-    
-    if response.get("items"):
-        guests = response["items"]
-        result = "👤 РЕЗУЛЬТАТЫ ПОИСКА\n\n"
-        
-        for guest in guests[:5]:
-            result += f"🆔 ID: {guest.get('guest_id')}\n"
-            result += f"📝 ФИО: {guest.get('fio', 'Не указано')}\n"
-            result += f"📱 Телефон: {guest.get('phone', 'Не указан')}\n"
-            
-            if guest.get("balance"):
-                result += f"💰 Баланс: {guest['balance'].get('amount', 0):,.2f} ₽\n"
-            if guest.get("bonus_balance"):
-                result += f"🎁 Бонусы: {guest['bonus_balance'].get('amount', 0)}\n"
-            result += "─" * 25 + "\n"
-        
-        await msg.edit_text(result)
-    else:
-        await msg.edit_text("❌ Гость не найден. Проверьте правильность данных.")
-    
-    await state.clear()
-
-@dp.message(F.text == "🎮 Сессии")
-async def sessions_prompt(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    
-    await message.answer(
-        "🎮 ИСТОРИЯ СЕССИЙ\n\nВведите ID гостя:",
-        reply_markup=get_back_keyboard()
-    )
-    await SessionsState.waiting_for_guest_id.set()
-
-@dp.message(StateFilter(SessionsState.waiting_for_guest_id))
-async def show_sessions(message: types.Message, state: FSMContext):
-    guest_id = message.text.strip()
-    
-    if not guest_id.isdigit():
-        await message.answer("❌ ID должен быть числом")
-        return
-    
-    msg = await message.answer(f"🔄 Загрузка сессий для гостя #{guest_id}...")
-    
-    response = await api.get_guest_sessions(int(guest_id))
-    
-    if response.get("status") and response.get("data"):
-        sessions = response["data"]
-        if sessions:
-            result = f"🎮 СЕССИИ ГОСТЯ #{guest_id}\n\n"
-            for session in sessions[:10]:
-                date_start = session.get("date_start", "N/A")[:16] if session.get("date_start") else "N/A"
-                date_stop = session.get("date_stop", "Активна")[:16] if session.get("date_stop") else "Активна"
-                status = "✅ Завершена" if session.get("normal_stop") else "🟢 Активна"
-                
-                result += f"📅 Начало: {date_start}\n"
-                result += f"⏱️ Окончание: {date_stop}\n"
-                result += f"📊 Статус: {status}\n"
-                result += "─" * 25 + "\n"
-            await msg.edit_text(result)
-        else:
-            await msg.edit_text(f"📭 Сессии для гостя #{guest_id} не найдены")
-    else:
-        await msg.edit_text(f"❌ Ошибка: {response.get('error', 'Не удалось получить сессии')}")
-    
-    await state.clear()
-
-@dp.message(F.text == "📊 Статистика")
-async def show_stats(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    
-    msg = await message.answer("📊 Сбор статистики за 30 дней...")
     
     date_to = datetime.now().strftime("%Y-%m-%d")
     date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
@@ -610,25 +562,35 @@ async def show_stats(message: types.Message):
     
     if response.get("status") and response.get("data"):
         transactions = response["data"]
-        total_sum = sum(float(tx.get("balance", 0)) for tx in transactions if float(tx.get("balance", 0)) > 0)
-        total_count = len([tx for tx in transactions if float(tx.get("balance", 0)) > 0])
+        total_income = sum(float(tx.get("balance", 0)) for tx in transactions if float(tx.get("balance", 0)) > 0)
+        income_count = len([tx for tx in transactions if float(tx.get("balance", 0)) > 0])
+        total_expense = sum(abs(float(tx.get("balance", 0))) for tx in transactions if float(tx.get("balance", 0)) < 0)
+        expense_count = len([tx for tx in transactions if float(tx.get("balance", 0)) < 0])
         
         result = f"""📊 ФИНАНСОВАЯ СТАТИСТИКА
 
 📅 Период: {date_from} - {date_to}
 
-💰 Общая выручка: {total_sum:,.2f} ₽
-📝 Количество операций: {total_count} шт.
+💰 ПОПОЛНЕНИЯ:
+• Сумма: {total_income:,.2f} ₽
+• Кол-во: {income_count} шт.
+• Средний чек: {total_income / income_count if income_count > 0 else 0:.2f} ₽
 
-📈 Средний чек: {total_sum / total_count if total_count > 0 else 0:.2f} ₽"""
+💸 СПИСАНИЯ:
+• Сумма: {total_expense:,.2f} ₽
+• Кол-во: {expense_count} шт.
+
+📈 ИТОГО:
+• Сальдо: {total_income - total_expense:,.2f} ₽
+• Всего операций: {len(transactions)} шт."""
         
         await msg.edit_text(result)
     else:
-        await msg.edit_text("❌ Недостаточно данных для статистики")
+        await msg.edit_text(f"❌ Ошибка получения статистики: {response.get('error', 'Неизвестная ошибка')}")
 
 @dp.message()
 async def handle_unknown(message: types.Message):
-    if not message.text.startswith("/") and message.text not in ["🔌 Проверить API", "🏢 Клубы", "💰 Балансы", "🎁 Бонусы", "💸 Транзакции", "📋 Лог операций", "👤 Поиск гостя", "🎮 Сессии", "📊 Статистика", "ℹ️ О боте", "◀️ Назад"]:
+    if not message.text.startswith("/") and message.text not in ["🔌 Проверить API", "📋 Лог операций", "💸 Транзакции", "💰 Балансы гостей", "🎁 Бонусы гостей", "🏢 Клубы", "📊 Смены", "📈 Статистика", "ℹ️ О боте", "◀️ Назад"]:
         await message.answer(
             "❓ Используйте кнопки меню или команду /help\n\n🔧 Первым делом нажмите '🔌 Проверить API'",
             reply_markup=get_main_keyboard()
@@ -642,16 +604,18 @@ async def main():
     
     await bot.delete_webhook(drop_pending_updates=True)
     
-    if API_KEY:
-        logger.info("Running automatic API connection test...")
+    # Быстрая проверка API при старте
+    if API_KEY and API_KEY != "MISSING_API_KEY":
+        logger.info("Testing API connection...")
         test_result = await api.test_connection()
-        logger.info(f"Auto API test result: {test_result['success']}")
-        if not test_result['success']:
-            logger.warning(f"API test failed: {test_result['error']}")
+        if test_result.get("success"):
+            logger.info("✅ API connection successful")
+        else:
+            logger.warning(f"⚠️ API connection failed: {test_result.get('error')}")
     else:
-        logger.warning("API Key not configured!")
+        logger.warning("⚠️ API Key not configured!")
     
-    logger.info("Bot is ready!")
+    logger.info("🎉 Bot is ready!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
