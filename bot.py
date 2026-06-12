@@ -102,7 +102,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== ОСНОВНАЯ ФУНКЦИЯ ДЛЯ ТОПА ТОВАРОВ ==========
+# ========== ФУНКЦИЯ ДЛЯ ТОПА ТОВАРОВ ==========
 async def get_top_products(date_from: datetime, date_to: datetime) -> list:
     """Возвращает топ товаров на основе данных из products/expense"""
     date_from_str = date_from.strftime("%Y-%m-%d")
@@ -150,7 +150,7 @@ async def get_top_products(date_from: datetime, date_to: datetime) -> list:
     
     return top
 
-# ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ (выручка, сессии) ==========
+# ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ (ВЫРУЧКА, СЕССИИ) ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     """Получение статистики из all_operations_log (выручка, сессии, гости)"""
     date_from_str = date_from.strftime("%Y-%m-%d")
@@ -158,6 +158,8 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     
     operations = await api.get_operations(date_from_str, date_to_str)
     operations_data = operations.get("data", []) if operations.get("status") else []
+    
+    logger.info(f"Найдено операций: {len(operations_data)}")
     
     total_income = 0
     sessions_count = 0
@@ -170,9 +172,18 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         op_name = item.get("name", "").lower()
         club_name = item.get("club_name", club_name)
         
-        # Пополнения (выручка)
+        # ПОПОЛНЕНИЯ (ВЫРУЧКА) - поддерживаем оба формата: "Пополнение" и "plus"
+        is_income = False
         if op_type == "Пополнение" and op_sum > 0:
+            is_income = True
+        elif op_type == "plus" and op_sum > 0:
+            is_income = True
+        elif "пополнение" in op_name and op_sum > 0:
+            is_income = True
+        
+        if is_income:
             total_income += op_sum
+            logger.debug(f"Пополнение: +{op_sum} ₽")
         
         # Подсчет сессий
         if "сессия" in op_name or "session" in op_name:
@@ -180,12 +191,16 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         
         # Уникальные гости
         guest_name = item.get("name", "")
-        if guest_name and len(guest_name) > 3 and op_type != "Пополнение":
+        if guest_name and len(guest_name) > 3 and not is_income:
             unique_guests.add(guest_name[:30])
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
     avg_daily = total_income / days_count if days_count > 0 else 0
+    
+    logger.info(f"ВЫРУЧКА: {total_income:.0f} ₽")
+    logger.info(f"СЕССИИ: {sessions_count}")
+    logger.info(f"ГОСТИ: {len(unique_guests)}")
     
     return {
         "total_income": total_income,
