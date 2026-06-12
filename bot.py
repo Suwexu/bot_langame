@@ -112,31 +112,30 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         op_type = item.get("type", "")
         op_name = item.get("name", "")
         op_name_lower = op_name.lower() if op_name else ""
-        op_source = item.get("source", "").lower() if item.get("source") else ""
         club_name = item.get("club_name", club_name)
         
         if op_sum <= 0:
             continue
             
-        # СБОР СТАТИСТИКИ АКТИВНОСТИ (не влияет на деньги)
+        # СБОР СТАТИСТИКИ АКТИВНОСТИ
         if "сессия" in op_name_lower or "session" in op_name_lower or "списание баланса" in op_name_lower:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name_lower:
             unique_guests.add(op_name[:30])
 
-        # ЧИСТЫЙ ФИНАНСОВЫЙ ФИЛЬТР ВЫРУЧКИ (Без текстовых ловушек)
-        valid_sources = ["admin", "cabinet", "mp", "app", "terminal", "mlm", "widget"]
-        
-        # 1. Если это реальное финансовое пополнение через кассу/ЛК/МП
-        if op_type == "Пополнение" and any(src in op_source for src in valid_sources):
-            # Отсекаем технические пополнения через вкладку статистики
-            if "статистика" not in op_name_lower and "корректировка" not in op_name_lower:
-                total_income += op_sum
+        # ФИНАНСОВЫЙ РАСЧЕТ ВЫРУЧКИ
+        # 1. Если это пополнение баланса реальными деньгами
+        if op_type == "Пополнение":
+            # Исключаем только технические корректировки админов из вкладки статистики
+            if "статистика" in op_name_lower or "корректировка" in op_name_lower:
+                continue
+            total_income += op_sum
                 
         # 2. Если это прямая продажа товара в баре (мимо баланса)
         elif op_type == "Продажа":
+            # Если это отмена чека продажи товара — уменьшаем выручку
             if "отмена" in op_name_lower or "возврат" in op_name_lower:
-                total_income -= op_sum  # Настоящий возврат товара
+                total_income -= op_sum
             else:
                 total_income += op_sum
 
@@ -227,7 +226,7 @@ async def start(message: types.Message):
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v16.0*\n\nИсправлен баг ложного распознавания системных отмен.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v17.0*\n\nОптимизированы фильтры типов транзакций. Кассовая точность.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
