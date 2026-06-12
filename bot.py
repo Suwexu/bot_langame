@@ -53,11 +53,9 @@ class LangameAPI:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
-        logger.info(f"API Client initialized with base URL: {base_url}")
+        logger.info(f"API Client initialized")
     
     async def request(self, endpoint: str, params: Dict = None, timeout: int = 90) -> Dict:
-        """Универсальный метод для GET запросов с /public_api"""
-        # Добавляем /public_api к пути
         url = f"{self.base_url}/public_api{endpoint}"
         logger.info(f"API Request: GET {url}")
         
@@ -65,11 +63,8 @@ class LangameAPI:
             try:
                 async with session.get(url, headers=self.headers, params=params, timeout=timeout) as resp:
                     logger.info(f"Response status: {resp.status}")
-                    
                     if resp.status == 200:
-                        result = await resp.json()
-                        logger.debug(f"Response has status: {result.get('status')}, data length: {len(result.get('data', []))}")
-                        return result
+                        return await resp.json()
                     elif resp.status == 401:
                         return {"status": False, "error": "Ошибка авторизации (401). Проверьте API ключ."}
                     elif resp.status == 403:
@@ -84,7 +79,6 @@ class LangameAPI:
                 return {"status": False, "error": str(e)}
     
     async def test_connection(self) -> Dict:
-        """Проверка подключения к API"""
         if not self.api_key:
             return {"success": False, "error": "API ключ не настроен"}
         
@@ -95,7 +89,6 @@ class LangameAPI:
             return {"success": False, "error": result.get("error", "Неизвестная ошибка")}
     
     async def get_operations_log(self, date_from: str = None, date_to: str = None) -> Dict:
-        """Лог операций - /all_operations_log/list"""
         params = {}
         if date_from:
             params["date_from"] = date_from
@@ -105,7 +98,6 @@ class LangameAPI:
     
     async def get_transactions(self, date_from: str = None, date_to: str = None,
                                 page: int = 1, limit: int = 20) -> Dict:
-        """Транзакции - /transactions/list"""
         params = {"page": page, "page_limit": limit}
         if date_from:
             params["date_from"] = date_from
@@ -114,30 +106,16 @@ class LangameAPI:
         return await self.request("/transactions/list", params=params)
     
     async def get_guests_balance(self, page: int = 1, limit: int = 20) -> Dict:
-        """Балансы гостей - /guests/balance"""
         return await self.request("/guests/balance", params={"page": page, "page_limit": limit})
     
     async def get_bonus_balance(self, page: int = 1, limit: int = 20) -> Dict:
-        """Бонусные балансы - /guests/bonus_balance"""
         return await self.request("/guests/bonus_balance", params={"page": page, "page_limit": limit})
     
     async def get_clubs(self) -> Dict:
-        """Список клубов - /clubs/list"""
         return await self.request("/clubs/list")
     
     async def get_working_shifts(self, page: int = 1, limit: int = 20) -> Dict:
-        """Список смен - /working_shifts/list"""
         return await self.request("/working_shifts/list", params={"page": page, "page_limit": limit})
-    
-    async def get_balances_list(self, date_from: str, date_to: str, page: int = 1, limit: int = 20) -> Dict:
-        """Пополнения баланса - /balances/list"""
-        params = {
-            "page": page,
-            "page_limit": limit,
-            "date_from": date_from,
-            "date_to": date_to
-        }
-        return await self.request("/balances/list", params=params)
 
 api = LangameAPI(API_KEY if API_KEY else "MISSING_API_KEY", API_BASE_URL)
 
@@ -152,10 +130,6 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def get_back_keyboard() -> ReplyKeyboardMarkup:
-    buttons = [[KeyboardButton(text="◀️ Назад")]]
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-
 # ========== ФОРМАТТЕРЫ ==========
 def format_test_result(result: Dict) -> str:
     if result.get("success"):
@@ -164,7 +138,7 @@ def format_test_result(result: Dict) -> str:
 📊 Статус: Работает
 🔑 API Key: Настроен
 ✅ Работает эндпоинт: {result.get('working_endpoint')}
-🌐 API URL: {API_BASE_URL}/public_api
+🌐 API URL: https://cyberx302.langame.ru/public_api
 
 🎉 Бот готов к работе!"""
     else:
@@ -180,7 +154,6 @@ def format_test_result(result: Dict) -> str:
 3. Обратитесь к администратору LANGAME"""
 
 def format_operations_log(data: Dict) -> str:
-    """Форматирование лога операций"""
     if not data.get("status"):
         return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
     
@@ -233,7 +206,6 @@ def format_operations_log(data: Dict) -> str:
     return result
 
 def format_transactions(data: Dict) -> str:
-    """Форматирование транзакций"""
     if not data.get("status"):
         return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
     
@@ -266,7 +238,6 @@ def format_transactions(data: Dict) -> str:
     return result
 
 def format_balances(data: Dict, title: str = "БАЛАНСЫ ГОСТЕЙ", currency: str = "₽") -> str:
-    """Форматирование балансов"""
     if not data.get("status"):
         return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
     
@@ -298,7 +269,6 @@ def format_balances(data: Dict, title: str = "БАЛАНСЫ ГОСТЕЙ", curr
     return result
 
 def format_clubs(data: Dict) -> str:
-    """Форматирование списка клубов"""
     if not data.get("status"):
         return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
     
@@ -321,7 +291,6 @@ def format_clubs(data: Dict) -> str:
     return result
 
 def format_working_shifts(data: Dict) -> str:
-    """Форматирование списка смен"""
     if not data.get("status"):
         return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
     
@@ -396,19 +365,15 @@ async def cmd_help(message: types.Message):
     
     await message.answer(help_text)
 
-@dp.message(F.text == "◀️ Назад")
-async def back_to_main(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("🏠 Главное меню", reply_markup=get_main_keyboard())
-
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api_connection(message: types.Message):
-    msg = await message.answer("🔄 Проверка подключения к API...")
+    loading_msg = await message.answer("🔄 Проверка подключения к API...")
     
     result = await api.test_connection()
     response_text = format_test_result(result)
     
-    await msg.edit_text(response_text)
+    await loading_msg.delete()
+    await message.answer(response_text)
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about_bot(message: types.Message):
@@ -416,12 +381,12 @@ async def about_bot(message: types.Message):
     
     about_text = f"""🤖 О БОТЕ LANGAME
 
-Версия: 2.1.0
+Версия: 2.2.0
 Платформа: Railway
 
 📌 СТАТУС API:
 • Ключ: {api_status}
-• URL: {API_BASE_URL}/public_api
+• URL: https://cyberx302.langame.ru/public_api
 
 ⏱️ Таймаут: 90 секунд
 
@@ -431,89 +396,101 @@ async def about_bot(message: types.Message):
 
 @dp.message(F.text == "📋 Лог операций")
 async def show_operations_log(message: types.Message):
-    msg = await message.answer("🔄 Загрузка лога операций за 30 дней...\n⏱️ До 90 секунд...", reply_markup=get_back_keyboard())
-    
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!")
+        await message.answer("❌ API ключ не настроен!")
         return
+    
+    loading_msg = await message.answer("🔄 Загрузка лога операций за 30 дней...\n⏱️ До 90 секунд...")
     
     date_to = datetime.now().strftime("%Y-%m-%d")
     date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     
     response = await api.get_operations_log(date_from, date_to)
     result = format_operations_log(response)
-    await msg.edit_text(result)
+    
+    await loading_msg.delete()
+    await message.answer(result, reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "💸 Транзакции")
 async def show_transactions(message: types.Message):
-    msg = await message.answer("🔄 Загрузка транзакций за 30 дней...\n⏱️ До 90 секунд...", reply_markup=get_back_keyboard())
-    
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!")
+        await message.answer("❌ API ключ не настроен!")
         return
+    
+    loading_msg = await message.answer("🔄 Загрузка транзакций за 30 дней...\n⏱️ До 90 секунд...")
     
     date_to = datetime.now().strftime("%Y-%m-%d")
     date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     
     response = await api.get_transactions(date_from, date_to)
     result = format_transactions(response)
-    await msg.edit_text(result)
+    
+    await loading_msg.delete()
+    await message.answer(result, reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "💰 Балансы гостей")
 async def show_balances(message: types.Message):
-    msg = await message.answer("🔄 Загрузка балансов гостей...\n⏱️ До 90 секунд...", reply_markup=get_back_keyboard())
-    
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!")
+        await message.answer("❌ API ключ не настроен!")
         return
+    
+    loading_msg = await message.answer("🔄 Загрузка балансов гостей...\n⏱️ До 90 секунд...")
     
     response = await api.get_guests_balance()
     result = format_balances(response, "БАЛАНСЫ ГОСТЕЙ", "₽")
-    await msg.edit_text(result)
+    
+    await loading_msg.delete()
+    await message.answer(result, reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🎁 Бонусы гостей")
 async def show_bonus_balances(message: types.Message):
-    msg = await message.answer("🔄 Загрузка бонусных балансов...\n⏱️ До 90 секунд...", reply_markup=get_back_keyboard())
-    
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!")
+        await message.answer("❌ API ключ не настроен!")
         return
+    
+    loading_msg = await message.answer("🔄 Загрузка бонусных балансов...\n⏱️ До 90 секунд...")
     
     response = await api.get_bonus_balance()
     result = format_balances(response, "БОНУСНЫЕ БАЛАНСЫ", "бонусов")
-    await msg.edit_text(result)
+    
+    await loading_msg.delete()
+    await message.answer(result, reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🏢 Клубы")
 async def show_clubs(message: types.Message):
-    msg = await message.answer("🔄 Загрузка списка клубов...", reply_markup=get_back_keyboard())
-    
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!")
+        await message.answer("❌ API ключ не настроен!")
         return
+    
+    loading_msg = await message.answer("🔄 Загрузка списка клубов...")
     
     response = await api.get_clubs()
     result = format_clubs(response)
-    await msg.edit_text(result)
+    
+    await loading_msg.delete()
+    await message.answer(result, reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📊 Смены")
 async def show_working_shifts(message: types.Message):
-    msg = await message.answer("🔄 Загрузка списка смен...\n⏱️ До 60 секунд...", reply_markup=get_back_keyboard())
-    
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!")
+        await message.answer("❌ API ключ не настроен!")
         return
+    
+    loading_msg = await message.answer("🔄 Загрузка списка смен...\n⏱️ До 60 секунд...")
     
     response = await api.get_working_shifts()
     result = format_working_shifts(response)
-    await msg.edit_text(result)
+    
+    await loading_msg.delete()
+    await message.answer(result, reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📈 Статистика")
 async def show_statistics(message: types.Message):
-    msg = await message.answer("📊 Сбор статистики за 30 дней...\n⏱️ До 90 секунд...")
-    
     if not API_KEY:
-        await msg.edit_text("❌ API ключ не настроен!")
+        await message.answer("❌ API ключ не настроен!")
         return
+    
+    loading_msg = await message.answer("📊 Сбор статистики за 30 дней...\n⏱️ До 90 секунд...")
     
     date_to = datetime.now().strftime("%Y-%m-%d")
     date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
@@ -544,13 +521,15 @@ async def show_statistics(message: types.Message):
 • Сальдо: {total_income - total_expense:,.2f} ₽
 • Всего операций: {len(transactions)} шт."""
         
-        await msg.edit_text(result)
+        await loading_msg.delete()
+        await message.answer(result, reply_markup=get_main_keyboard())
     else:
-        await msg.edit_text(f"❌ Ошибка: {response.get('error', 'Неизвестная ошибка')}")
+        await loading_msg.delete()
+        await message.answer(f"❌ Ошибка: {response.get('error', 'Неизвестная ошибка')}", reply_markup=get_main_keyboard())
 
 @dp.message()
 async def handle_unknown(message: types.Message):
-    if message.text not in ["🔌 Проверить API", "📋 Лог операций", "💸 Транзакции", "💰 Балансы гостей", "🎁 Бонусы гостей", "🏢 Клубы", "📊 Смены", "📈 Статистика", "ℹ️ О боте", "◀️ Назад"] and not message.text.startswith("/"):
+    if message.text not in ["🔌 Проверить API", "📋 Лог операций", "💸 Транзакции", "💰 Балансы гостей", "🎁 Бонусы гостей", "🏢 Клубы", "📊 Смены", "📈 Статистика", "ℹ️ О боте"] and not message.text.startswith("/"):
         await message.answer(
             "❓ Используйте кнопки меню или /help\n\n🔧 Нажмите '🔌 Проверить API'",
             reply_markup=get_main_keyboard()
@@ -558,7 +537,7 @@ async def handle_unknown(message: types.Message):
 
 async def main():
     logger.info("🚀 LANGAME Telegram Bot starting...")
-    logger.info(f"API URL: {API_BASE_URL}/public_api")
+    logger.info(f"API URL: https://cyberx302.langame.ru/public_api")
     logger.info(f"API Key: {'✅ Configured' if API_KEY else '❌ Missing'}")
     
     await bot.delete_webhook(drop_pending_updates=True)
