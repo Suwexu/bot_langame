@@ -72,7 +72,7 @@ class LangameAPI:
     async def get_clubs(self) -> Dict:
         return await self._request("/clubs/list")
     
-    async def get_operations((self, date_from: str, date_to: str) -> Dict:
+    async def get_operations(self, date_from: str, date_to: str) -> Dict:
         return await self._request("/all_operations_log/list", params={"date_from": date_from, "date_to": date_to})
     
     async def get_products_list(self) -> Dict:
