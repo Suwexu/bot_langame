@@ -118,33 +118,27 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         if op_sum <= 0:
             continue
             
-        # 1. Обработка возвратов денег клиентам
-        if any(word in op_name_lower for word in ["возврат", "отмена", "cancel"]):
-            total_income -= op_sum
-            continue
-
-        # 2. Игнорируем внутренние технические списания / сессии / инкассации кассы
-        if (
-            "списание" in op_name_lower or 
-            "инкассация" in op_name_lower or 
-            "статистика" in op_name_lower or
-            "корректировка" in op_name_lower or
-            op_type in ["minus", "Списание"]
-        ):
-            continue
-            
-        # 3. Финансовый фильтр по реальным источникам денег
-        valid_sources = ["admin", "cabinet", "mp", "app", "terminal", "mlm", "widget"]
-        
-        # Если это пополнение через кассу/апп ИЛИ это прямая продажа товара мимо баланса
-        if (any(src in op_source for src in valid_sources) and op_type == "Пополнение") or op_type == "Продажа":
-            total_income += op_sum
-            
-        # Сбор сопутствующей статистики
+        # СБОР СТАТИСТИКИ АКТИВНОСТИ (не влияет на деньги)
         if "сессия" in op_name_lower or "session" in op_name_lower or "списание баланса" in op_name_lower:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name_lower:
             unique_guests.add(op_name[:30])
+
+        # ЧИСТЫЙ ФИНАНСОВЫЙ ФИЛЬТР ВЫРУЧКИ (Без текстовых ловушек)
+        valid_sources = ["admin", "cabinet", "mp", "app", "terminal", "mlm", "widget"]
+        
+        # 1. Если это реальное финансовое пополнение через кассу/ЛК/МП
+        if op_type == "Пополнение" and any(src in op_source for src in valid_sources):
+            # Отсекаем технические пополнения через вкладку статистики
+            if "статистика" not in op_name_lower and "корректировка" not in op_name_lower:
+                total_income += op_sum
+                
+        # 2. Если это прямая продажа товара в баре (мимо баланса)
+        elif op_type == "Продажа":
+            if "отмена" in op_name_lower or "возврат" in op_name_lower:
+                total_income -= op_sum  # Настоящий возврат товара
+            else:
+                total_income += op_sum
 
     # Сбор топ товаров
     top_products_dict = defaultdict(float)
@@ -233,7 +227,7 @@ async def start(message: types.Message):
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v15.0*\n\nИсправлена логика учета прямых продаж бара и фильтрация корректировок.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v16.0*\n\nИсправлен баг ложного распознавания системных отмен.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
@@ -267,7 +261,7 @@ async def quick_report(message: types.Message):
 
 @dp.message(F.text == "📊 Выбрать период")
 async def select_period_start(message: types.Message, state: FSMContext):
-    await message.answer("📅 Введите дату начала в формате `ГГГГ-ММ-ДД` (например, `2026-06-10`):", parse_mode="Markdown")
+    await message.answer("📅 Введите дату начала в формате `ГГГГ-ММ-ДД` (например, `2026-06-11`):", parse_mode="Markdown")
     await state.set_state(PeriodState.waiting_date_from)
 
 @dp.message(StateFilter(PeriodState.waiting_date_from))
