@@ -57,30 +57,29 @@ class LangameAPI:
         self.base_url = f"{API_BASE_URL}/public_api"
         self.headers = {"X-Request-Token": api_key, "Content-Type": "application/json"}
     
-    async def get_operations(self, date_from: str, date_to: str) -> Dict:
-        url = f"{self.base_url}/all_operations_log/list"
-        params = {"date_from": date_from, "date_to": date_to}
+    async def _request(self, endpoint: str, params: Dict = None) -> Dict:
+        url = f"{self.base_url}{endpoint}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=self.headers, params=params, timeout=90) as resp:
                     if resp.status == 200:
                         return await resp.json()
                     else:
+                        logger.warning(f"Эндпоинт {endpoint} вернул {resp.status}")
                         return {"status": False, "error": f"HTTP {resp.status}"}
         except Exception as e:
             return {"status": False, "error": str(e)}
     
+    async def get_operations(self, date_from: str, date_to: str) -> Dict:
+        """Лог операций - работает"""
+        return await self._request("/all_operations_log/list", params={"date_from": date_from, "date_to": date_to})
+    
+    async def get_products_expense(self, date_from: str, date_to: str) -> Dict:
+        """Продажи товаров - пробуем без club_id"""
+        return await self._request("/products/expense", params={"date_from": date_from, "date_to": date_to, "page_limit": 2000})
+    
     async def get_clubs(self) -> Dict:
-        url = f"{self.base_url}/clubs/list"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self.headers, timeout=30) as resp:
-                    if resp.status == 200:
-                        return await resp.json()
-                    else:
-                        return {"status": False, "error": f"HTTP {resp.status}"}
-        except Exception as e:
-            return {"status": False, "error": str(e)}
+        return await self._request("/clubs/list")
 
 api = LangameAPI(API_KEY if API_KEY else "")
 
@@ -113,99 +112,23 @@ def format_date_ru(date_str: str) -> str:
         date_str = date_str.replace(eng, rus)
     return date_str
 
-# ПОЛНЫЙ СПИСОК ТОВАРОВ (на основе вашей таблицы)
-PRODUCT_NAMES = [
-    # Напитки
-    "Флеш", "Добрый", "Берн", "Хрустальная", "Эвервесс Кола", "Липтон",
-    "Импор. газировка", "Кола", "Пепси", "Спрайт", "Фанта", "Кока-кола",
-    "Адреналин", "Аква Минерале", "Рич", "Бон Аква", "Палпи", "Монстер",
-    "РедБулл", "Холодный кофе Лотте", "Чупа Чупс", "SAC SAC",
-    
-    # Еда
-    "Чиабатта", "Кацу", "Чебупели", "Чебупицца", "Ходстеры", "Кальян",
-    "Сникерс", "Баунти", "Твикс", "Орео Чоко-Пай", "КитКат", "Шарики КитКат",
-    "Мальтизерс", "М&M", "Вафли Несквик", "Принглс", "Лейс",
-    
-    # Пиво
-    "Пиво Козёл", "Пиво Хадыженское", "Пиво Старый Мельник",
-    
-    # Шоколад и сладости
-    "Милка Шоколадный Напиток", "Милка", "Сникерс", "Баунти", "Твикс",
-    
-    # Остальное
-    "Бургер", "Пицца", "Кофе", "Чай", "Сок", "Вода", "Наггетсы", "Картошка",
-    "Сэндвич", "Хот-дог", "Сосиска", "Слойка", "Круассан", "Пончик",
-    "Маффин", "Торт", "Пирожное", "Мороженое", "Гамбургер", "Чизбургер",
-    "Салат", "Фрукты"
-]
-
-# Слова для ИСКЛЮЧЕНИЯ (НЕ товары)
-EXCLUDED_NAMES = [
-    "пополнение баланса", "списание баланса", "инкассация", 
-    "автоматическая инкассация", "техническое обслуживание", 
-    "служебная операция", "корректировка", "возврат",
-    "блокировка", "разблокировка", "технический старт", 
-    "техническая остановка", "сессия", "бонус", "скидка"
-]
-
-def is_product(name: str) -> bool:
-    """Проверка, является ли операция товаром"""
-    if not name:
-        return False
-    
-    name_lower = name.lower()
-    
-    # Исключаем служебные операции
-    for excluded in EXCLUDED_NAMES:
-        if excluded in name_lower:
-            return False
-    
-    # Проверяем по списку товаров
-    for product in PRODUCT_NAMES:
-        if product.lower() in name_lower:
-            return True
-    
-    # Если название длинное и нет признаков служебной операции - считаем товаром
-    if len(name) > 5 and not any(x in name_lower for x in ["сессия", "блокировка", "технический"]):
-        return True
-    
-    return False
-
 async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
-    """Получение статистики из all_operations_log"""
+    """Получение статистики"""
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
     logger.info(f"Период: {date_from_str} - {date_to_str}")
     
+    # Получаем данные из двух источников
     operations = await api.get_operations(date_from_str, date_to_str)
+    products = await api.get_products_expense(date_from_str, date_to_str)
     
-    if not operations.get("status"):
-        logger.error(f"Ошибка API: {operations.get('error')}")
-        return {
-            "date_from": date_from,
-            "date_to": date_to,
-            "total_income": 0,
-            "sessions_count": 0,
-            "unique_guests": 0,
-            "avg_check": 0,
-            "bar_revenue": 0,
-            "top_products": [],
-            "error": operations.get("error")
-        }
-    
-    operations_list = operations.get("data", [])
-    logger.info(f"Найдено операций: {len(operations_list)}")
-    
-    # Сбор статистики
+    # Статистика из операций (выручка, сессии)
+    operations_list = operations.get("data", []) if operations.get("status") else []
     total_income = 0
     sessions_count = 0
     unique_guests = set()
-    products = defaultdict(float)
     club_name = "CyberX Краснодар Коммунаров"
-    
-    # Для отладки - выводим примеры названий товаров
-    product_samples = []
     
     for item in operations_list:
         op_sum = safe_float(item.get("sum", 0))
@@ -213,52 +136,42 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
         op_name = item.get("name", "")
         club_name = item.get("club_name", club_name)
         
-        # Пополнения (выручка)
         if op_type == "plus" and op_sum > 0:
             total_income += op_sum
         
-        # Товары (списания)
-        if op_type == "minus" and op_sum > 0 and op_name:
-            if is_product(op_name):
-                clean_name = op_name.strip()
-                products[clean_name] += op_sum
-                if len(product_samples) < 10:
-                    product_samples.append(clean_name)
-        
-        # Сессии
         name_lower = op_name.lower()
-        if any(x in name_lower for x in ["сессия", "session", "запуск", "игровая"]):
+        if any(x in name_lower for x in ["сессия", "session", "запуск"]):
             sessions_count += 1
         
-        # Уникальные гости
-        if op_name and len(op_name) > 3 and op_type != "plus":
-            if not any(ex in op_name.lower() for ex in EXCLUDED_NAMES):
-                unique_guests.add(op_name[:50])
+        if op_name and len(op_name) > 3:
+            unique_guests.add(op_name[:50])
     
-    # Логируем примеры товаров для отладки
-    if product_samples:
-        logger.info(f"Примеры названий товаров: {product_samples[:5]}")
-    else:
-        logger.warning("Товары не найдены! Проверьте названия операций.")
-        # Выводим примеры всех списаний для анализа
-        sample_minus = []
-        for item in operations_list[:20]:
-            if item.get("type") == "minus" and item.get("name"):
-                sample_minus.append(item.get("name"))
-        if sample_minus:
-            logger.info(f"Примеры списаний: {sample_minus[:10]}")
+    # Статистика из товаров (продажи)
+    products_list = products.get("data", []) if products.get("status") else []
+    products_total = defaultdict(float)
     
-    top_products = sorted(products.items(), key=lambda x: x[1], reverse=True)[:10]
-    bar_revenue = sum(products.values())
+    logger.info(f"Найдено товаров в products/expense: {len(products_list)}")
     
-    avg_check = total_income / sessions_count if sessions_count > 0 else 0
+    for item in products_list:
+        name = item.get("name", "")
+        price = safe_float(item.get("price_sale", 0))
+        count = safe_float(item.get("count", 0))
+        sale_sum = price * count
+        
+        if name and sale_sum > 0:
+            products_total[name] += sale_sum
+            logger.debug(f"Товар: {name} - {sale_sum} ₽")
+    
+    top_products = sorted(products_total.items(), key=lambda x: x[1], reverse=True)[:10]
+    bar_revenue = sum(products_total.values())
+    
+    # Средний чек
     days_count = max((date_to - date_from).days + 1, 1)
+    avg_check = total_income / sessions_count if sessions_count > 0 else 0
     avg_daily = total_income / days_count if days_count > 0 else 0
     
     logger.info(f"Выручка: {total_income:.0f} ₽")
-    logger.info(f"Сессии: {sessions_count}")
-    logger.info(f"Товаров найдено: {len(products)}")
-    logger.info(f"Выручка бара: {bar_revenue:.0f} ₽")
+    logger.info(f"Товаров найдено: {len(products_total)}")
     logger.info(f"Топ товаров: {top_products[:3]}")
     
     return {
@@ -273,7 +186,8 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
         "top_products": top_products,
         "avg_daily": avg_daily,
         "club_name": club_name,
-        "raw_count": len(operations_list)
+        "raw_operations": len(operations_list),
+        "raw_products": len(products_list)
     }
 
 def format_report(stats: Dict) -> str:
@@ -316,7 +230,8 @@ def format_report(stats: Dict) -> str:
     
     result += f"""
 📈 *Аналитика:*
-• Всего операций: {stats['raw_count']}
+• Всего операций: {stats['raw_operations']}
+• Найдено товаров: {stats['raw_products']}
 
 #дайджест #ежедневный"""
     
@@ -355,8 +270,7 @@ def format_simple(stats: Dict, title: str) -> str:
     else:
         result += "• Нет данных\n"
     
-    result += f"\n📊 Найдено записей: {stats['raw_count']}"
-    result += f"\n\n#отчет"
+    result += f"\n#отчет"
     return result
 
 # ========== ОБРАБОТЧИКИ ==========
@@ -382,14 +296,11 @@ async def about(message: types.Message):
     await message.answer(
         "🤖 *LANGAME АНАЛИТИКА v5.0*\n\n"
         "Бот для аналитики игрового клуба\n\n"
-        "📊 *Источник данных:* /all_operations_log/list\n"
+        "📊 *Что умеет:*\n"
+        "• Анализ выручки за любой период\n"
+        "• Топ товаров (из products/expense)\n"
+        "• Статистика сессий и гостей\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД\n\n"
-        "🍔 *В топ товаров включаются:*\n"
-        "• Напитки (Флеш, Добрый, Кола, Липтон и др.)\n"
-        "• Еда (Чиабатта, Кацу, Чебупели, Ходстеры)\n"
-        "• Сладости (Сникерс, Баунти, Твикс, Милка)\n"
-        "• Пиво, кальяны, снеки\n\n"
-        "❌ *Исключены:* списание баланса, инкассация, служебные операции\n\n"
         "💡 Данные обновляются в реальном времени",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
@@ -406,24 +317,23 @@ async def test_api(message: types.Message):
     date_to = datetime.now().strftime("%Y-%m-%d")
     date_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     
-    result = await api.get_operations(date_from, date_to)
+    # Проверяем оба эндпоинта
+    ops = await api.get_operations(date_from, date_to)
+    prods = await api.get_products_expense(date_from, date_to)
+    
     await msg.delete()
     
-    if result.get("status"):
-        data_count = len(result.get("data", []))
-        await message.answer(
-            f"✅ *API РАБОТАЕТ!*\n\n"
-            f"📊 Найдено операций за 7 дней: {data_count}\n\n"
-            f"Нажмите «📊 За сегодня» для отчета",
-            parse_mode="Markdown",
-            reply_markup=get_main_keyboard()
-        )
-    else:
-        await message.answer(
-            f"❌ Ошибка: {result.get('error')}\n\n"
-            f"💡 Проверьте API ключ",
-            reply_markup=get_main_keyboard()
-        )
+    result_text = f"✅ *API ПРОВЕРКА*\n\n"
+    result_text += f"📊 all_operations_log: {'✅' if ops.get('status') else '❌'} ({len(ops.get('data', []))} записей)\n"
+    result_text += f"📊 products/expense: {'✅' if prods.get('status') else '❌'} ({len(prods.get('data', []))} записей)\n\n"
+    
+    if prods.get('status') and prods.get('data'):
+        sample = prods['data'][:3]
+        result_text += f"📋 Примеры товаров:\n"
+        for s in sample:
+            result_text += f"• {s.get('name')} — {s.get('price_sale')} ₽ x {s.get('count')}\n"
+    
+    await message.answer(result_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🏢 Клубы")
 async def clubs(message: types.Message):
@@ -460,9 +370,7 @@ async def make_report(message: types.Message, days: int, title: str, use_full_fo
         stats = await get_stats(date_from, date_to)
         await msg.delete()
         
-        if stats.get('error'):
-            await message.answer(f"❌ Ошибка API: {stats['error']}", reply_markup=get_main_keyboard())
-        elif stats['total_income'] == 0 and stats['raw_count'] == 0:
+        if stats['total_income'] == 0 and stats['raw_operations'] == 0:
             await message.answer(
                 f"⚠️ *Нет данных за {title.lower()}*\n\n"
                 f"📅 {date_from.strftime('%d.%m.%Y')}\n\n"
@@ -543,9 +451,7 @@ async def custom_execute(message: types.Message, state: FSMContext):
         stats = await get_stats(date_from, date_to)
         await msg.delete()
         
-        if stats.get('error'):
-            await message.answer(f"❌ Ошибка API: {stats['error']}", reply_markup=get_main_keyboard())
-        elif stats['total_income'] == 0 and stats['raw_count'] == 0:
+        if stats['total_income'] == 0 and stats['raw_operations'] == 0:
             await message.answer(
                 f"⚠️ *Нет данных за период {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}*\n\n"
                 f"💡 Попробуйте расширить период",
