@@ -23,7 +23,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("LANGAME_API_KEY")
 API_BASE_URL = "https://cyberx302.langame.ru/public_api"
 
-# Включаем DEBUG-логирование, чтобы в консоли видеть отсеченные операции
+# Включаем логирование. Можно изменить на logging.INFO, если логи в консоли слишком подробные
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class LangameAPI:
     async def get_clubs(self) -> Dict:
         return await self._request("/clubs/list")
     
-    async def get_operations(self, date_from: str, date_to: str) -> Dict:
+    async def get_operations((self, date_from: str, date_to: str) -> Dict:
         return await self._request("/all_operations_log/list", params={"date_from": date_from, "date_to": date_to})
     
     async def get_products_list(self) -> Dict:
@@ -136,7 +136,7 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     total_income = 0
     sessions_count = 0
     unique_guests = set()
-    club_name = "CyberX Краснодар Коммунаров"
+    club_name = "CyberX Клуб"
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
@@ -148,42 +148,35 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         
         is_valid = False
         
-        # 1. Пополнения: Любой источник (admin, cabinet, app, site и т.д.), кроме возвратов
+        # 1. УЧИТЫВАЕМ ТОЛЬКО ПРИТОК ЖИВЫХ ДЕНЕГ (plus)
         if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
+            # Исключаем технические операции возвратов
             if "возврат" not in op_name_lower and "cancel" not in op_name_lower and "отмена" not in op_name_lower:
                 is_valid = True
         
-        # 2. Продажи бара / списания: Убираем жесткую привязку только к "admin"
-        # Учитываем продажи через ЛК/Приложения, если они оформлены как списание за товары
+        # 2. ОПЕРАЦИИ МИНУС (Списание баланса, автоинкассация) ПОЛНОСТЬЮ ИГНОРИРУЕМ
+        # Это предотвращает двойной учет одних и тех же денег.
         if (op_type == "Списание" or op_type == "minus") and op_sum > 0:
-            if "сессия" not in op_name_lower and "бронь" not in op_name_lower and "session" not in op_name_lower:
-                if "возврат" not in op_name_lower and "отмена" not in op_name_lower:
-                    is_valid = True
-        
+            is_valid = False
+            
         if is_valid:
             total_income += op_sum
-            logger.debug(f"➕ УЧТЕНО: {op_sum} ₽ | Тип: {op_type} | Источник: {op_source} | {op_name[:40]}")
+            logger.debug(f"➕ УЧТЕНО В ВЫРУЧКУ: {op_sum} ₽ | Тип: {op_type} | Источник: {op_source} | {op_name[:40]}")
         else:
-            # Выводим в лог то, что не попало в отчет, для поиска расхождений
             if op_sum > 0 and op_type in ["Пополнение", "plus", "Списание", "minus"]:
-                logger.debug(f"❌ ПРОПУЩЕНО: {op_sum} ₽ | Тип: {op_type} | Источник: {op_source} | Название: {op_name[:40]}")
+                logger.debug(f"❌ ИСКЛЮЧЕНО (Внутренний оборот): {op_sum} ₽ | Тип: {op_type} | Название: {op_name[:40]}")
         
-        # Подсчет сессий
-        if "сессия" in op_name_lower or "session" in op_name_lower:
+        # Статистика: подсчет сессий
+        if "сессия" in op_name_lower or "session" in op_name_lower or "списание баланса" in op_name_lower:
             sessions_count += 1
         
-        # Подсчет гостей
-        if op_name and len(op_name) > 3:
+        # Статистика: уникальные пользователи
+        if op_name and len(op_name) > 3 and "баланса" in op_name_lower:
             unique_guests.add(op_name[:30])
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
     avg_daily = total_income / days_count if days_count > 0 else 0
-    
-    logger.info("=" * 60)
-    logger.info(f"✅ ИТОГОВАЯ ВЫРУЧКА В ЛОГЕ: {total_income:,.0f} ₽")
-    logger.info(f"🎮 Сессии: {sessions_count} | 👥 Гости: {len(unique_guests)}")
-    logger.info("=" * 60)
     
     return {
         "total_income": total_income,
@@ -255,7 +248,7 @@ def format_full_report(stats: Dict, top_products: list) -> str:
     for eng, rus in months.items():
         date_name = date_name.replace(eng, rus)
     
-    result = f"""📊 *RAW DATA {stats['club_name']}*
+    result = f"""📊 *ДАННЫЕ {stats['club_name']}*
 {date_name}
 
 💰 *Финансы:*
@@ -264,13 +257,8 @@ def format_full_report(stats: Dict, top_products: list) -> str:
 
 🎮 *Сессии:* {stats['sessions_count']} (гостей: {stats['unique_guests']})
 
-🏆 *Топ тарифов:*\n"""
-    
-    result += "• Нет данных\n"
-    
-    result += f"""
-🔄 *Смены и возвраты:*
-• Нет данных
+🏆 *Топ тарифов:*
+• См. в панели управления Langame
 
 🍔 *Топ товаров бара:*\n"""
     
@@ -308,11 +296,11 @@ async def start(message: types.Message):
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
     await message.answer(
-        "🤖 *LANGAME АНАЛИТИКА v8.1*\n\n"
+        "🤖 *LANGAME АНАЛИТИКА v8.2*\n\n"
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
-        "• Анализ выручки за любой период (все пополнения + продажи бара)\n"
-        "• Автоматический учет транзакций из внешних источников\n"
+        "• Анализ выручки за любой период без двойного учета баланса\n"
+        "• Автоматический учет транзакций из внешних источников (МП/ЛК/Админ)\n"
         "• Топ товаров (количество × цена)\n"
         "• Статистика сессий\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД",
@@ -337,8 +325,8 @@ async def test_api(message: types.Message):
         data_count = len(result.get("data", []))
         await message.answer(
             f"✅ *API РАБОТАЕТ!*\n\n"
-            f"📊 Найдено продаж за 7 дней: {data_count}\n\n"
-            f"Нажмите «📊 Выбрать период» для анализа",
+            f"📊 Найдено записей продаж бара за 7 дней: {data_count}\n\n"
+            f"Нажмите «📊 Выбрать период» для анализа финансовых данных.",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
