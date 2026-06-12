@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Any
+from typing import Dict, Any
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -23,6 +23,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("LANGAME_API_KEY")
 API_BASE_URL = "https://cyberx302.langame.ru"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Список разрешенных пользователей (ID Telegram)
+# Добавьте сюда ID пользователей, которые могут выполнять опасные операции
+ALLOWED_USERS = [int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x] if os.getenv("ALLOWED_USERS") else []
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
@@ -62,6 +66,14 @@ class ProductsExpenseState(StatesGroup):
     waiting_for_date_from = State()
     waiting_for_date_to = State()
 
+class BalanceTopupState(StatesGroup):
+    waiting_for_guest_id = State()
+    waiting_for_amount = State()
+    waiting_for_comment = State()
+
+class PcManageState(StatesGroup):
+    waiting_for_uuids = State()
+
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def safe_float(value: Any, default: float = 0) -> float:
     """Безопасное преобразование в float"""
@@ -94,6 +106,12 @@ def format_bonus(amount: Any) -> str:
         return f"{safe_float(amount):,.0f}"
     except:
         return f"{amount}"
+
+def is_admin(user_id: int) -> bool:
+    """Проверка, имеет ли пользователь права администратора"""
+    if not ALLOWED_USERS:
+        return True  # Если список пуст - разрешаем всем
+    return user_id in ALLOWED_USERS
 
 # ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
 bot = Bot(token=BOT_TOKEN)
@@ -148,9 +166,11 @@ class LangameAPI:
             return {"success": True, "working_endpoint": "/all_operations_log/list"}
         return {"success": False, "error": result.get("error", "Неизвестная ошибка")}
     
+    # ========== КЛУБЫ ==========
     async def get_clubs(self) -> Dict:
         return await self.request("/clubs/list")
     
+    # ========== ГОСТИ ==========
     async def get_guests_list(self, page: int = 1, limit: int = 20, guest_id: int = None) -> Dict:
         params = {"page": page, "page_limit": limit}
         if guest_id:
@@ -185,6 +205,43 @@ class LangameAPI:
     async def get_bonus_balance(self, page: int = 1, limit: int = 20) -> Dict:
         return await self.request("/guests/bonus_balance", params={"page": page, "page_limit": limit})
     
+    # ========== УПРАВЛЕНИЕ БАЛАНСОМ ГОСТЯ ==========
+    async def update_guest_balance(self, guest_id: int, amount: float, operation_type: str = "balance", 
+                                    comment: str = None, balance_type: str = None) -> Dict:
+        """
+        Пополнение/списание баланса гостя
+        operation_type: "balance" - деньги, "bonus_balance" - бонусы
+        """
+        data = {
+            "type": operation_type,
+            "sum": amount
+        }
+        if comment:
+            data["comment"] = comment
+        if balance_type:
+            data["balance_type"] = balance_type
+        
+        return await self.request(f"/guests/{guest_id}/balance", method="POST", data=data)
+    
+    # ========== УПРАВЛЕНИЕ КОМПЬЮТЕРАМИ ==========
+    async def manage_pc(self, command: str, club_id: int = None, uuids: list = None, pc_type: str = "free") -> Dict:
+        """
+        Управление компьютерами
+        command: "tech_start", "tech_stop", "lock", "unlock", "reboot", "power_on", "power_off"
+        pc_type: "all" - все ПК, "free" - только свободные
+        """
+        data = {
+            "command": command,
+            "type": pc_type
+        }
+        if club_id:
+            data["club_id"] = club_id
+        if uuids:
+            data["uuids"] = uuids
+        
+        return await self.request("/pc/manage", method="POST", data=data)
+    
+    # ========== ТРАНЗАКЦИИ И БАЛАНСЫ ==========
     async def get_transactions(self, date_from: str = None, date_to: str = None, page: int = 1, limit: int = 20) -> Dict:
         params = {"page": page, "page_limit": limit}
         if date_from:
@@ -213,12 +270,14 @@ class LangameAPI:
     async def get_balances_list(self, date_from: str, date_to: str, page: int = 1, limit: int = 20) -> Dict:
         return await self.request("/balances/list", params={"page": page, "page_limit": limit, "date_from": date_from, "date_to": date_to})
     
+    # ========== КОМПЬЮТЕРЫ ==========
     async def get_pc_list(self) -> Dict:
         return await self.request("/global/linking_pc_by_type/list")
     
     async def get_pc_types(self) -> Dict:
         return await self.request("/global/types_of_pc_in_clubs/list")
     
+    # ========== ТОВАРЫ ==========
     async def get_products_list(self) -> Dict:
         return await self.request("/products/list")
     
@@ -238,6 +297,7 @@ class LangameAPI:
             params["type"] = type_filter
         return await self.request("/products/expense", params=params)
     
+    # ========== ТАРИФЫ ==========
     async def get_tariffs(self) -> Dict:
         return await self.request("/tariffs/time_period/list")
     
@@ -250,9 +310,11 @@ class LangameAPI:
     async def get_tariff_by_days(self) -> Dict:
         return await self.request("/tariffs/by_days/list")
     
+    # ========== АДМИНИСТРАТОРЫ ==========
     async def get_users_list(self) -> Dict:
         return await self.request("/users/list")
     
+    # ========== КОНФИГУРАЦИЯ ==========
     async def get_config(self) -> Dict:
         return await self.request("/config/list")
     
@@ -286,7 +348,12 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="📅 Группы тарифов"), KeyboardButton(text="🏷️ Типы тарифов")],
         [KeyboardButton(text="👨‍💼 Администраторы"), KeyboardButton(text="⚙️ Конфигурация")],
         [KeyboardButton(text="📁 Профили PUF"), KeyboardButton(text="🔌 Маршруты")],
-        [KeyboardButton(text="📱 Админ ПО"), KeyboardButton(text="💻 Терминал")]
+        [KeyboardButton(text="📱 Админ ПО"), KeyboardButton(text="💻 Терминал")],
+        [KeyboardButton(text="💰 Пополнить баланс"), KeyboardButton(text="💸 Списать баланс")],
+        [KeyboardButton(text="🖥️ Технический старт"), KeyboardButton(text="🔓 Ручная разблокировка")],
+        [KeyboardButton(text="🔒 Блокировка ПК"), KeyboardButton(text="🔄 Перезагрузка ПК")],
+        [KeyboardButton(text="🛑 Тех. остановка"), KeyboardButton(text="🔌 Включить ПК")],
+        [KeyboardButton(text="⛔ Выключить ПК")]
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -297,7 +364,16 @@ def get_search_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📝 По ФИО", callback_data="search_name")]
     ])
 
-# ========== ФОРМАТТЕРЫ (с защитой от ошибок) ==========
+def get_pc_manage_keyboard(command: str, title: str) -> InlineKeyboardMarkup:
+    """Клавиатура для управления ПК"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🖥️ Все свободные ПК", callback_data=f"pc_{command}_free")],
+        [InlineKeyboardButton(text="🎮 Все ПК (включая занятые)", callback_data=f"pc_{command}_all")],
+        [InlineKeyboardButton(text="📋 Выбрать по UUID", callback_data=f"pc_{command}_uuids")],
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data="pc_cancel")]
+    ])
+
+# ========== ФОРМАТТЕРЫ ==========
 def format_clubs(data: Dict) -> str:
     if not data.get("status"):
         return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
@@ -549,8 +625,9 @@ async def test_api(message: types.Message):
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about_bot(message: types.Message):
-    await message.answer("🤖 LANGAME БОТ v3.0\n📍 Все команды из API LANGAME\n⏱️ Таймаут: 90 секунд", reply_markup=get_main_keyboard())
+    await message.answer("🤖 LANGAME БОТ v3.0\n📍 Все команды из API LANGAME\n⏱️ Таймаут: 90 секунд\n\n🔐 Для выполнения операций с балансом и ПК нужны права администратора.", reply_markup=get_main_keyboard())
 
+# ========== КЛУБЫ ==========
 @dp.message(F.text == "🏢 Клубы")
 async def show_clubs(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -559,6 +636,7 @@ async def show_clubs(message: types.Message):
     await msg.delete()
     await message.answer(format_clubs(response), reply_markup=get_main_keyboard())
 
+# ========== ГОСТИ ==========
 @dp.message(F.text == "👤 Список гостей")
 async def show_guests_list(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -652,6 +730,7 @@ async def show_sessions(message: types.Message, state: FSMContext):
     await message.answer(format_guest_sessions(response, int(message.text)), reply_markup=get_main_keyboard())
     await state.clear()
 
+# ========== БАЛАНСЫ ==========
 @dp.message(F.text == "💰 Балансы")
 async def show_balances(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -668,6 +747,7 @@ async def show_bonus(message: types.Message):
     await msg.delete()
     await message.answer(format_balances(response, "БОНУСНЫЕ БАЛАНСЫ", "бонусов"), reply_markup=get_main_keyboard())
 
+# ========== ТРАНЗАКЦИИ ==========
 @dp.message(F.text == "💸 Транзакции")
 async def show_transactions(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -688,6 +768,7 @@ async def show_operations(message: types.Message):
     await msg.delete()
     await message.answer(format_operations_log(response), reply_markup=get_main_keyboard())
 
+# ========== КАССА ==========
 @dp.message(F.text == "💳 Кассовые операции")
 async def cash_transactions_prompt(message: types.Message):
     await message.answer("💳 Введите ID клуба:")
@@ -727,6 +808,7 @@ async def cash_transactions_result(message: types.Message, state: FSMContext):
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
     await state.clear()
 
+# ========== СМЕНЫ ==========
 @dp.message(F.text == "📊 Смены")
 async def show_shifts(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -735,6 +817,7 @@ async def show_shifts(message: types.Message):
     await msg.delete()
     await message.answer(format_working_shifts(response), reply_markup=get_main_keyboard())
 
+# ========== ПОПОЛНЕНИЯ ==========
 @dp.message(F.text == "💰 Пополнения")
 async def balances_history_prompt(message: types.Message):
     await message.answer("📅 Введите дату ОТ (ГГГГ-ММ-ДД):")
@@ -764,6 +847,7 @@ async def balances_history_result(message: types.Message, state: FSMContext):
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
     await state.clear()
 
+# ========== КОМПЬЮТЕРЫ ==========
 @dp.message(F.text == "🖥️ Компьютеры")
 async def show_pc(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -789,6 +873,7 @@ async def show_pc_types(message: types.Message):
     else:
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
 
+# ========== ТОВАРЫ ==========
 @dp.message(F.text == "🍔 Товары")
 async def show_products(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -884,6 +969,7 @@ async def products_expense_result(message: types.Message, state: FSMContext):
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
     await state.clear()
 
+# ========== ТАРИФЫ ==========
 @dp.message(F.text == "💲 Тарифы")
 async def show_tariffs(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -931,6 +1017,7 @@ async def show_tariff_types(message: types.Message):
     else:
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
 
+# ========== АДМИНИСТРАТОРЫ ==========
 @dp.message(F.text == "👨‍💼 Администраторы")
 async def show_users(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -939,6 +1026,7 @@ async def show_users(message: types.Message):
     await msg.delete()
     await message.answer(format_users_list(response), reply_markup=get_main_keyboard())
 
+# ========== КОНФИГУРАЦИЯ ==========
 @dp.message(F.text == "⚙️ Конфигурация")
 async def show_config(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -1020,11 +1108,183 @@ async def show_terminal_config(message: types.Message):
     else:
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
 
+# ========== УПРАВЛЕНИЕ БАЛАНСОМ ГОСТЯ ==========
+@dp.message(F.text == "💰 Пополнить баланс")
+async def topup_balance_prompt(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет прав для выполнения этой операции!")
+        return
+    await message.answer("💳 Введите ID гостя для пополнения баланса:")
+    await BalanceTopupState.waiting_for_guest_id.set()
+    await BalanceTopupState.update_data(operation="topup")
+
+@dp.message(F.text == "💸 Списать баланс")
+async def withdraw_balance_prompt(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет прав для выполнения этой операции!")
+        return
+    await message.answer("💳 Введите ID гостя для списания баланса:")
+    await BalanceTopupState.waiting_for_guest_id.set()
+    await BalanceTopupState.update_data(operation="withdraw")
+
+@dp.message(StateFilter(BalanceTopupState.waiting_for_guest_id))
+async def balance_amount_prompt(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Введите числовой ID гостя!")
+        return
+    await state.update_data(guest_id=int(message.text))
+    await message.answer("💰 Введите сумму (положительное число):")
+    await state.set_state(BalanceTopupState.waiting_for_amount)
+
+@dp.message(StateFilter(BalanceTopupState.waiting_for_amount))
+async def balance_comment_prompt(message: types.Message, state: FSMContext):
+    try:
+        amount = float(message.text.replace(",", "."))
+        if amount <= 0:
+            await message.answer("❌ Сумма должна быть положительной!")
+            return
+    except ValueError:
+        await message.answer("❌ Введите корректную сумму (число)!")
+        return
+    
+    data = await state.get_data()
+    operation = data.get("operation", "topup")
+    final_amount = amount if operation == "topup" else -amount
+    
+    await state.update_data(amount=final_amount)
+    await message.answer("📝 Введите комментарий к операции (или 'нет' для пропуска):")
+    await state.set_state(BalanceTopupState.waiting_for_comment)
+
+@dp.message(StateFilter(BalanceTopupState.waiting_for_comment))
+async def balance_execute(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    comment = None if message.text.lower() == "нет" else message.text
+    
+    msg = await message.answer(f"🔄 Выполняется операция для гостя #{data['guest_id']} на сумму {data['amount']} ₽...")
+    
+    response = await api.update_guest_balance(
+        guest_id=data['guest_id'],
+        amount=data['amount'],
+        operation_type="balance",
+        comment=comment,
+        balance_type="BALANCE_EDIT_CP_TOPUP"
+    )
+    
+    await msg.delete()
+    
+    if response.get("status"):
+        operation_text = "ПОПОЛНЕНИЕ" if data['amount'] > 0 else "СПИСАНИЕ"
+        await message.answer(f"✅ ОПЕРАЦИЯ УСПЕШНО ВЫПОЛНЕНА!\n\n{operation_text}\n👤 Гость #{data['guest_id']}\n💰 Сумма: {data['amount']:+,.2f} ₽\n📝 Комментарий: {comment or 'Нет'}", reply_markup=get_main_keyboard())
+    else:
+        await message.answer(f"❌ Ошибка: {response.get('error', 'Неизвестная ошибка')}", reply_markup=get_main_keyboard())
+    
+    await state.clear()
+
+# ========== УПРАВЛЕНИЕ КОМПЬЮТЕРАМИ ==========
+# Словарь команд для ПК
+PC_COMMANDS = {
+    "🖥️ Технический старт": "tech_start",
+    "🛑 Тех. остановка": "tech_stop",
+    "🔓 Ручная разблокировка": "unlock",
+    "🔒 Блокировка ПК": "lock",
+    "🔄 Перезагрузка ПК": "reboot",
+    "🔌 Включить ПК": "power_on",
+    "⛔ Выключить ПК": "power_off"
+}
+
+@dp.message(F.text.in_(PC_COMMANDS.keys()))
+async def pc_manage_prompt(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет прав для выполнения этой операции!")
+        return
+    
+    command = PC_COMMANDS[message.text]
+    title = message.text
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🖥️ Все свободные ПК", callback_data=f"pc_{command}_free")],
+        [InlineKeyboardButton(text="🎮 Все ПК (включая занятые)", callback_data=f"pc_{command}_all")],
+        [InlineKeyboardButton(text="📋 Выбрать по UUID", callback_data=f"pc_{command}_uuids")],
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data="pc_cancel")]
+    ])
+    await message.answer(f"🖥️ {title}\n\nВыберите режим выполнения:", reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data.startswith("pc_"))
+async def pc_manage_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback.data == "pc_cancel":
+        await callback.message.edit_text("❌ Операция отменена")
+        await callback.answer()
+        return
+    
+    parts = callback.data.split("_")
+    command = parts[1]
+    mode = parts[2]
+    
+    if mode == "free":
+        msg = await callback.message.answer(f"🔄 Выполняется {command} для всех свободных ПК...")
+        response = await api.manage_pc(command=command, pc_type="free")
+        await msg.delete()
+        if response.get("status"):
+            await callback.message.answer(f"✅ Команда '{command}' успешно отправлена для всех свободных ПК!", reply_markup=get_main_keyboard())
+        else:
+            await callback.message.answer(f"❌ Ошибка: {response.get('error', 'Неизвестная ошибка')}", reply_markup=get_main_keyboard())
+    
+    elif mode == "all":
+        msg = await callback.message.answer(f"🔄 Выполняется {command} для ВСЕХ ПК...")
+        response = await api.manage_pc(command=command, pc_type="all")
+        await msg.delete()
+        if response.get("status"):
+            await callback.message.answer(f"✅ Команда '{command}' успешно отправлена для ВСЕХ ПК!", reply_markup=get_main_keyboard())
+        else:
+            await callback.message.answer(f"❌ Ошибка: {response.get('error', 'Неизвестная ошибка')}", reply_markup=get_main_keyboard())
+    
+    elif mode == "uuids":
+        await state.update_data(pc_command=command)
+        await callback.message.answer("📋 Введите UUID ПК (можно несколько через запятую или пробел):\n\nПример: abc-123, def-456\n\n💡 Список UUID можно получить через '🖥️ Компьютеры'")
+        await state.set_state(PcManageState.waiting_for_uuids)
+    
+    await callback.message.delete()
+    await callback.answer()
+
+@dp.message(StateFilter(PcManageState.waiting_for_uuids))
+async def pc_manage_uuids(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    command = data.get("pc_command")
+    
+    # Разбираем UUID (можно через запятую, пробел, или новую строку)
+    uuids = [uuid.strip() for uuid in message.text.replace(",", " ").split() if uuid.strip()]
+    
+    if not uuids:
+        await message.answer("❌ Не указаны UUID! Попробуйте снова.")
+        return
+    
+    msg = await message.answer(f"🔄 Выполняется {command} для {len(uuids)} ПК...")
+    response = await api.manage_pc(command=command, uuids=uuids)
+    await msg.delete()
+    
+    if response.get("status"):
+        await message.answer(f"✅ Команда '{command}' успешно отправлена для {len(uuids)} ПК!", reply_markup=get_main_keyboard())
+    else:
+        await message.answer(f"❌ Ошибка: {response.get('error', 'Неизвестная ошибка')}", reply_markup=get_main_keyboard())
+    
+    await state.clear()
+
+# ========== ОБРАБОТЧИК НЕИЗВЕСТНЫХ СООБЩЕНИЙ ==========
 @dp.message()
 async def handle_unknown(message: types.Message):
     if not message.text.startswith("/") and not any(message.text == btn for row in get_main_keyboard().keyboard for btn in row):
         await message.answer("❓ Используйте кнопки меню или /help", reply_markup=get_main_keyboard())
 
+# ========== ЗАПУСК ==========
 async def main():
     logger.info("🚀 LANGAME Telegram Bot starting...")
     await bot.delete_webhook(drop_pending_updates=True)
