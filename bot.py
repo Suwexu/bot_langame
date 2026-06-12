@@ -75,15 +75,12 @@ class LangameAPI:
         return await self._request("/clubs/list")
     
     async def get_operations(self, date_from: str, date_to: str) -> Dict:
-        """Лог операций (для выручки и сессий)"""
         return await self._request("/all_operations_log/list", params={"date_from": date_from, "date_to": date_to})
     
     async def get_products_list(self) -> Dict:
-        """Список товаров (для получения названий по ID)"""
         return await self._request("/products/list")
     
     async def get_products_expense(self, date_from: str, date_to: str, page: int = 1) -> Dict:
-        """Продажи товаров (основной источник для топа)"""
         return await self._request("/products/expense", params={
             "date_from": date_from,
             "date_to": date_to,
@@ -104,75 +101,53 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
 
 # ========== ФУНКЦИЯ ДЛЯ ТОПА ТОВАРОВ ==========
 async def get_top_products(date_from: datetime, date_to: datetime) -> list:
-    """Возвращает топ товаров на основе данных из products/expense"""
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
-    # 1. Получаем список товаров (ID -> название)
     products_list = await api.get_products_list()
     goods = {}
     for item in products_list.get("data", []):
         goods[item.get("id")] = item.get("name", f"Товар #{item.get('id')}")
     
-    logger.info(f"Загружено товаров: {len(goods)}")
-    
-    # 2. Получаем продажи за период
     first_page = await api.get_products_expense(date_from_str, date_to_str, 1)
     total_pages = first_page.get("total_pages", 1)
     
-    logger.info(f"Страниц продаж: {total_pages}")
-    
-    # Словарь для сбора выручки по товарам
     revenue = defaultdict(float)
     
     for page in range(1, total_pages + 1):
         data = await api.get_products_expense(date_from_str, date_to_str, page)
-        
         for sale in data.get("data", []):
-            # Пропускаем отмененные продажи
             if sale.get("cancel") == 1:
                 continue
-            
             goods_id = sale.get("list_goods_id")
             name = goods.get(goods_id, f"Товар #{goods_id}")
-            
             count = safe_float(sale.get("count", 1))
             price = safe_float(sale.get("price_sale", 0))
-            
             revenue[name] += count * price
     
-    # Сортируем по убыванию и берем топ-15
     top = sorted(revenue.items(), key=lambda x: x[1], reverse=True)[:15]
-    
-    logger.info(f"Топ товаров: {len(top)} позиций")
-    for name, amount in top[:5]:
-        logger.info(f"  {name[:30]}: {amount:.0f} ₽")
-    
     return top
 
-# ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ (ВЫРУЧКА, СЕССИИ) ==========
+# ========== АНАЛИТИЧЕСКИЕ ФУНКЦИИ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
-    """Получение статистики из all_operations_log (выручка, сессии, гости)"""
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
     operations = await api.get_operations(date_from_str, date_to_str)
     operations_data = operations.get("data", []) if operations.get("status") else []
     
-    logger.info(f"Найдено операций: {len(operations_data)}")
-    
     total_income = 0
-    total_refund = 0
     sessions_count = 0
     unique_guests = set()
     club_name = "CyberX Краснодар Коммунаров"
-    
-    # Детализация по типам операций
-    income_by_type = defaultdict(float)
-    refund_by_type = defaultdict(float)
-    
-    # Для отладки - список всех пополнений
     all_income_operations = []
+    
+    # Ключевые слова для исключения из пополнений
+    exclude_keywords = [
+        "возврат", "refund", "берн", "монстер", "флеш", "добрый", "сникерс", 
+        "баунти", "твикс", "милка", "лейс", "принглс", "пиво", "кальян",
+        "импор", "козёл", "хадыженское", "старый мельник", "липтон", "кола"
+    ]
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
@@ -180,100 +155,60 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         op_name = item.get("name", "").lower()
         original_name = item.get("name", "")
         op_source = item.get("source", "")
-        op_cancel = item.get("cancel", 0)
         club_name = item.get("club_name", club_name)
         
-        # Пропускаем отмененные операции
-        if op_cancel == 1:
-            logger.debug(f"Пропущена отмененная операция: {original_name[:50]}")
-            continue
+        # Реальные пополнения (исключаем возвраты и продажи товаров)
+        is_real_income = False
+        if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
+            is_excluded = False
+            for keyword in exclude_keywords:
+                if keyword in op_name:
+                    is_excluded = True
+                    break
+            if "возврат" in op_name:
+                is_excluded = True
+            if not is_excluded:
+                is_real_income = True
         
-        # ПОПОЛНЕНИЯ (ВЫРУЧКА) - поддерживаем все форматы
-        is_income = False
-        
-        if op_type == "Пополнение" and op_sum > 0:
-            is_income = True
-            income_by_type["Пополнение"] += op_sum
-        elif op_type == "plus" and op_sum > 0:
-            is_income = True
-            income_by_type["plus"] += op_sum
-        elif "пополнение" in op_name and op_sum > 0:
-            is_income = True
-            income_by_type["название_содержит_пополнение"] += op_sum
-        
-        if is_income:
+        if is_real_income:
             total_income += op_sum
             all_income_operations.append({
                 "sum": op_sum,
-                "type": op_type,
-                "source": op_source,
                 "name": original_name[:50]
             })
         
-        # ВОЗВРАТЫ
-        if "возврат" in op_name or "refund" in op_name:
-            refund_amount = abs(op_sum)
-            total_refund += refund_amount
-            refund_by_type[op_type] += refund_amount
-        
-        # ПОДСЧЕТ СЕССИЙ
-        if "сессия" in op_name or "session" in op_name or "запуск" in op_name:
+        # Сессии
+        if "сессия" in op_name or "session" in op_name:
             sessions_count += 1
         
-        # УНИКАЛЬНЫЕ ГОСТИ
+        # Гости
         guest_name = item.get("name", "")
-        if guest_name and len(guest_name) > 3 and not is_income and "возврат" not in op_name:
+        if guest_name and len(guest_name) > 3:
             unique_guests.add(guest_name[:30])
-    
-    # Итоговая выручка (с учетом возвратов)
-    net_income = total_income - total_refund
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
-    avg_daily = net_income / days_count if days_count > 0 else 0
+    avg_daily = total_income / days_count if days_count > 0 else 0
     
-    # ВЫВОДИМ ДЕТАЛЬНЫЙ ОТЧЕТ В ЛОГ
     logger.info("=" * 60)
-    logger.info("📊 ДЕТАЛИЗАЦИЯ ВЫРУЧКИ:")
-    logger.info(f"  Пополнения (тип 'Пополнение'): {income_by_type.get('Пополнение', 0):,.0f} ₽")
-    logger.info(f"  Пополнения (тип 'plus'): {income_by_type.get('plus', 0):,.0f} ₽")
-    logger.info(f"  Пополнения (по названию): {income_by_type.get('название_содержит_пополнение', 0):,.0f} ₽")
-    logger.info(f"  ➕ Общая сумма пополнений: {total_income:,.0f} ₽")
-    logger.info(f"")
-    logger.info(f"  Возвраты (тип 'minus'): {refund_by_type.get('minus', 0):,.0f} ₽")
-    logger.info(f"  Возвраты (тип 'Списание'): {refund_by_type.get('Списание', 0):,.0f} ₽")
-    logger.info(f"  ➖ Общая сумма возвратов: {total_refund:,.0f} ₽")
-    logger.info(f"")
-    logger.info(f"  ✅ ИТОГОВАЯ ВЫРУЧКА: {net_income:,.0f} ₽")
-    logger.info(f"")
-    logger.info(f"  Сессии: {sessions_count}")
-    logger.info(f"  Гости: {len(unique_guests)}")
+    logger.info(f"📊 Реальных пополнений: {len(all_income_operations)}")
+    logger.info(f"✅ ИТОГОВАЯ ВЫРУЧКА: {total_income:,.0f} ₽")
+    logger.info(f"📋 СПИСОК ПОПОЛНЕНИЙ:")
+    for inc in all_income_operations:
+        logger.info(f"  +{inc['sum']:,.0f} ₽ | {inc['name']}")
     logger.info("=" * 60)
-    
-    # ВЫВОДИМ ВСЕ ПОПОЛНЕНИЯ ДЛЯ ОТЛАДКИ
-    if all_income_operations:
-        logger.info("📋 СПИСОК ВСЕХ ПОПОЛНЕНИЙ:")
-        for inc in all_income_operations:
-            logger.info(f"  +{inc['sum']:,.0f} ₽ | тип={inc['type']} | источник={inc['source']} | {inc['name']}")
-    else:
-        logger.info("📋 Нет пополнений за этот период")
     
     return {
-        "total_income": net_income,
-        "total_income_gross": total_income,
-        "total_refund": total_refund,
-        "income_by_type": dict(income_by_type),
-        "refund_by_type": dict(refund_by_type),
+        "total_income": total_income,
         "avg_check": avg_check,
         "sessions_count": sessions_count,
         "unique_guests": len(unique_guests),
         "avg_daily": avg_daily,
         "club_name": club_name,
-        "raw_operations": len(operations_data),
-        "all_income_operations": all_income_operations
+        "raw_operations": len(operations_data)
     }
 
-# ========== ФОРМАТИРОВАНИЕ ОТЧЕТОВ ==========
+# ========== ФОРМАТИРОВАНИЕ ==========
 def format_simple_stats(stats: Dict, title: str, top_products: list) -> str:
     date_from = stats['period_from']
     date_to = stats['period_to']
@@ -306,66 +241,6 @@ def format_simple_stats(stats: Dict, title: str, top_products: list) -> str:
         result += "• Нет данных\n"
     
     result += f"\n#отчет"
-    return result
-
-def format_full_report(stats: Dict, top_products: list) -> str:
-    date_from = stats['period_from']
-    date_to = stats['period_to']
-    
-    if date_from.date() == date_to.date():
-        period_str = date_from.strftime('%d.%m.%Y')
-    else:
-        period_str = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-    
-    # Форматируем дату
-    date_name = date_from.strftime("%A, %d %B %Y")
-    weekdays = {
-        "Monday": "Понедельник", "Tuesday": "Вторник", "Wednesday": "Среда",
-        "Thursday": "Четверг", "Friday": "Пятница", "Saturday": "Суббота", "Sunday": "Воскресенье"
-    }
-    months = {
-        "January": "января", "February": "февраля", "March": "марта",
-        "April": "апреля", "May": "мая", "June": "июня",
-        "July": "июля", "August": "августа", "September": "сентября",
-        "October": "октября", "November": "ноября", "December": "декабря"
-    }
-    for eng, rus in weekdays.items():
-        date_name = date_name.replace(eng, rus)
-    for eng, rus in months.items():
-        date_name = date_name.replace(eng, rus)
-    
-    result = f"""📊 *RAW DATA {stats['club_name']}*
-{date_name}
-
-💰 *Финансы:*
-• Выручка: {stats['total_income']:,.0f} ₽
-• Средний чек: {stats['avg_check']:,.0f} ₽
-
-🎮 *Сессии:* {stats['sessions_count']} (гостей: {stats['unique_guests']})
-
-🏆 *Топ тарифов:*\n"""
-    
-    result += "• Нет данных\n"
-    
-    result += f"""
-🔄 *Смены и возвраты:*
-• Нет данных
-
-🍔 *Топ товаров бара:*\n"""
-    
-    if top_products:
-        for i, (name, amount) in enumerate(top_products[:5], 1):
-            short_name = name[:25] + "..." if len(name) > 25 else name
-            result += f"{i}. {short_name} — {amount:,.0f} ₽\n"
-    else:
-        result += "• Нет данных\n"
-    
-    result += f"""
-📈 *Аналитика:*
-• Средний чек: {stats['avg_check']:,.0f} ₽
-
-#дайджест #ежедневный"""
-    
     return result
 
 # ========== ОБРАБОТЧИКИ ==========
@@ -413,11 +288,9 @@ async def test_api(message: types.Message):
     
     if result.get("status"):
         data_count = len(result.get("data", []))
-        total_pages = result.get("total_pages", 0)
         await message.answer(
             f"✅ *API РАБОТАЕТ!*\n\n"
-            f"📊 Найдено продаж за 7 дней: {data_count}\n"
-            f"📄 Всего страниц: {total_pages}\n\n"
+            f"📊 Найдено продаж за 7 дней: {data_count}\n\n"
             f"Нажмите «📊 Выбрать период» для анализа",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
@@ -455,16 +328,14 @@ async def quick_report(message: types.Message):
     date_to = datetime.now()
     date_from = date_to.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # Получаем статистику
     stats = await get_stats_for_period(date_from, date_to)
     stats["period_from"] = date_from
     stats["period_to"] = date_to
     
-    # Получаем топ товаров
     top_products = await get_top_products(date_from, date_to)
     
     await msg.delete()
-    await message.answer(format_full_report(stats, top_products), parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer(format_simple_stats(stats, "БЫСТРЫЙ ОТЧЕТ", top_products), parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📊 Выбрать период")
 async def select_period_start(message: types.Message, state: FSMContext):
@@ -508,12 +379,10 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         
         msg = await message.answer(f"📊 Сбор статистики за {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}...\n⏱️ Подождите...")
         
-        # Получаем статистику
         stats = await get_stats_for_period(date_from, date_to)
         stats["period_from"] = date_from
         stats["period_to"] = date_to
         
-        # Получаем топ товаров
         top_products = await get_top_products(date_from, date_to)
         
         await msg.delete()
@@ -521,9 +390,7 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         if stats['total_income'] == 0 and not top_products:
             await message.answer(
                 f"⚠️ *Нет данных за период {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}*\n\n"
-                f"💡 *Возможные причины:*\n"
-                f"• В этот период не было операций\n"
-                f"• Попробуйте другой период",
+                f"💡 Попробуйте другой период",
                 parse_mode="Markdown",
                 reply_markup=get_main_keyboard()
             )
@@ -536,7 +403,6 @@ async def select_period_execute(message: types.Message, state: FSMContext):
     
     await state.clear()
 
-# ========== ОБРАБОТЧИК НЕИЗВЕСТНЫХ ==========
 @dp.message()
 async def unknown(message: types.Message):
     if not message.text.startswith("/"):
@@ -544,14 +410,11 @@ async def unknown(message: types.Message):
             "❓ Используйте кнопки меню\n\n"
             "📊 *Как получить отчет:*\n"
             "• «📈 Быстрый отчет» — за сегодня\n"
-            "• «📊 Выбрать период» — за любой период\n\n"
-            "📅 *Формат:* ГГГГ-ММ-ДД\n"
-            "Пример: `2026-06-01`",
+            "• «📊 Выбрать период» — за любой период",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
 
-# ========== ЗАПУСК ==========
 async def main():
     logger.info("🚀 LANGAME Аналитика бот запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
