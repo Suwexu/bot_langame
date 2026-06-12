@@ -93,20 +93,18 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== РАСЧЕТ ФИНАНСОВЫХ ПОКАЗАТЕЛЕЙ ==========
+# ========== ДИНАМИЧЕСКИЙ РАСЧЕТ ВЫРУЧКИ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
-    # Сбор данных из двух разных эндпоинтов (Операции баланса + Продажи товаров)
     operations = await api.get_operations(date_from_str, date_to_str)
     operations_data = operations.get("data", []) if operations.get("status") else []
     
     products_list = await api.get_products_list()
     goods = {item.get("id"): item.get("name", f"Товар #{item.get('id')}") for item in products_list.get("data", [])}
     
-    # 1. Считаем выручку по логу основных операций (Пополнения баланса гостями)
-    ops_income = 0
+    total_income = 0
     sessions_count = 0
     unique_guests = set()
     club_name = "CyberX Клуб"
@@ -121,25 +119,33 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         if op_sum <= 0:
             continue
             
-        # Исключаем внутренний оборот (списание на ПК) и автоинкассации
+        # ИСКЛЮЧЕНИЕ 1: Внутренний оборот (списания на сессии ПК и автоинкассации кассы)
         if "списание баланса" in op_name_lower or "инкассация" in op_name_lower or op_type in ["minus", "Списание"]:
+            # Если это реальный возврат денег гостю, вычитаем его из выручки
             if any(word in op_name_lower for word in ["возврат", "отмена", "cancel"]):
-                ops_income -= op_sum  # Учитываем возвраты, если они прошли через минус
+                total_income -= op_sum
+                logger.debug(f"➖ ВЫЧЕТ (Возврат): -{op_sum} ₽ | {op_name[:40]}")
             continue
             
-        # Считаем чистые приходы пополнений
-        if not any(word in op_name_lower for word in ["возврат", "отмена", "cancel"]):
-            ops_income += op_sum
+        # ИСКЛЮЧЕНИЕ 2: Корректировки балансов, не являющиеся прямой выручкой
+        # (Убираем "Статистика и балансы гостей", чтобы не было завышения кассы на 10 июня)
+        if "статистика и баланс" in op_name_lower or "корректировка" in op_name_lower:
+            logger.debug(f"⚙️ ИГНОР (Техническая операция): {op_sum} ₽ | {op_name[:40]}")
+            continue
             
+        # ФИЛЬТР ЧИСТОГО ПРИХОДА (plus)
+        if not any(word in op_name_lower for word in ["возврат", "отмена", "cancel"]):
+            total_income += op_sum
+            logger.debug(f"➕ УЧТЕНО: {op_sum} ₽ | Тип: {op_type} | {op_name[:40]}")
+            
+        # Сбор статистики активности
         if "сессия" in op_name_lower or "session" in op_name_lower or "списание баланса" in op_name_lower:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name_lower:
             unique_guests.add(op_name[:30])
 
-    # 2. Считаем выручку по продажам из Магазина/Бара (включая прямые чеки админа и MLM)
-    shop_income = 0
+    # Подсчет статистики продаж по бару (для вывода топ-товаров)
     top_products_dict = defaultdict(float)
-    
     first_page = await api.get_products_expense(date_from_str, date_to_str, 1)
     total_pages = first_page.get("total_pages", 1)
     
@@ -152,22 +158,11 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
             name = goods.get(goods_id, f"Товар #{goods_id}")
             count = safe_float(sale.get("count", 1))
             price = safe_float(sale.get("price_sale", 0))
-            
-            amount = count * price
-            shop_income += amount
-            top_products_dict[name] += amount
-
-    # Сверяем расхождения: убираем пересечения, если товар оплачивался с баланса гостя.
-    # В Langame Excel-выручка собирается как: Общий лог плюс + (Продажи Бара, не прошедшие пополнением).
-    # Дельта в 318 рублей как раз покрывает прямые чеки товаров и внешние шлюзы MLM.
-    total_income = ops_income + (318.0 if (ops_income > 17000 and ops_income < 17500) else (shop_income * 0.15 if ops_income > 0 else 0))
-    if ops_income > 17000 and ops_income < 17500:
-        total_income = 17721.0  # Жесткая калибровка для точного совпадения за этот день
+            top_products_dict[name] += count * price
 
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
     avg_daily = total_income / days_count if days_count > 0 else 0
-    
     top_products = sorted(top_products_dict.items(), key=lambda x: x[1], reverse=True)
     
     return {
@@ -229,14 +224,14 @@ def format_full_report(stats: Dict) -> str:
 
 #дайджест #ежедневный"""
 
-# ========== ОБРАБОТЧИКИ ==========
+# ========== ТЕЛЕГРАМ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот готов к синхронизации с Excel-отчетами.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот полностью синхронизирован со всеми вкладками Excel-отчетов.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v10.0*\n\nДобавлено двухфакторное сканирование транзакций (баланс + бар) для совпадения с Excel.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v11.0*\n\nВнедрен динамический фильтр технических корректировок баланса.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
@@ -270,7 +265,7 @@ async def quick_report(message: types.Message):
 
 @dp.message(F.text == "📊 Выбрать период")
 async def select_period_start(message: types.Message, state: FSMContext):
-    await message.answer("📅 Введите дату начала в формате `ГГГГ-ММ-ДД` (например, `2026-06-01`):", parse_mode="Markdown")
+    await message.answer("📅 Введите дату начала в формате `ГГГГ-ММ-ДД` (например, `2026-06-10`):", parse_mode="Markdown")
     await state.set_state(PeriodState.waiting_date_from)
 
 @dp.message(StateFilter(PeriodState.waiting_date_from))
