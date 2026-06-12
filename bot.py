@@ -22,6 +22,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("LANGAME_API_KEY")
 API_BASE_URL = "https://cyberx302.langame.ru"
+CLUB_ID = 1  # Всегда используем ID = 1
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,11 +44,26 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 def safe_float(value: Any) -> float:
+    """Безопасное преобразование в float (учитывая, что приходит строка)"""
+    if value is None:
+        return 0
     try:
         if isinstance(value, str):
-            return float(value.replace(',', '.')) if value else 0
-        return float(value) if value else 0
-    except:
+            cleaned = value.replace(',', '.').strip()
+            return float(cleaned) if cleaned else 0
+        return float(value)
+    except (ValueError, TypeError):
+        return 0
+
+def safe_int(value: Any) -> int:
+    """Безопасное преобразование в int"""
+    if value is None:
+        return 0
+    try:
+        if isinstance(value, str):
+            return int(float(value.replace(',', '.'))) if value else 0
+        return int(value)
+    except (ValueError, TypeError):
         return 0
 
 # ========== API КЛИЕНТ ==========
@@ -63,20 +79,30 @@ class LangameAPI:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=self.headers, params=params, timeout=90) as resp:
                     if resp.status == 200:
-                        return await resp.json()
+                        result = await resp.json()
+                        if result.get("status"):
+                            logger.info(f"Эндпоинт {endpoint}: {len(result.get('data', []))} записей")
+                        return result
                     else:
-                        logger.warning(f"Эндпоинт {endpoint} вернул {resp.status}")
+                        logger.warning(f"Эндпоинт {endpoint} вернул {resp.status}, params={params}")
                         return {"status": False, "error": f"HTTP {resp.status}"}
         except Exception as e:
+            logger.error(f"Ошибка: {e}")
             return {"status": False, "error": str(e)}
     
     async def get_operations(self, date_from: str, date_to: str) -> Dict:
-        """Лог операций - работает"""
+        """Лог операций - работает без club_id"""
         return await self._request("/all_operations_log/list", params={"date_from": date_from, "date_to": date_to})
     
     async def get_products_expense(self, date_from: str, date_to: str) -> Dict:
-        """Продажи товаров - пробуем без club_id"""
-        return await self._request("/products/expense", params={"date_from": date_from, "date_to": date_to, "page_limit": 2000})
+        """Продажи товаров - с club_id=1"""
+        params = {
+            "date_from": date_from,
+            "date_to": date_to,
+            "club_id": CLUB_ID,
+            "page_limit": 2000
+        }
+        return await self._request("/products/expense", params=params)
     
     async def get_clubs(self) -> Dict:
         return await self._request("/clubs/list")
@@ -117,7 +143,7 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
-    logger.info(f"Период: {date_from_str} - {date_to_str}")
+    logger.info(f"Период: {date_from_str} - {date_to_str}, клуб: {CLUB_ID}")
     
     # Получаем данные из двух источников
     operations = await api.get_operations(date_from_str, date_to_str)
@@ -152,17 +178,21 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
     
     logger.info(f"Найдено товаров в products/expense: {len(products_list)}")
     
+    # Выводим примеры товаров для отладки
+    if products_list:
+        logger.info(f"Пример товара: {products_list[0]}")
+    
     for item in products_list:
         name = item.get("name", "")
         price = safe_float(item.get("price_sale", 0))
-        count = safe_float(item.get("count", 0))
+        count = safe_int(item.get("count", 0))
         sale_sum = price * count
         
         if name and sale_sum > 0:
             products_total[name] += sale_sum
-            logger.debug(f"Товар: {name} - {sale_sum} ₽")
+            logger.debug(f"Товар: {name} - {sale_sum} ₽ (price={price}, count={count})")
     
-    top_products = sorted(products_total.items(), key=lambda x: x[1], reverse=True)[:10]
+    top_products = sorted(products_total.items(), key=lambda x: x[1], reverse=True)[:15]
     bar_revenue = sum(products_total.values())
     
     # Средний чек
@@ -191,7 +221,7 @@ async def get_stats(date_from: datetime, date_to: datetime) -> Dict:
     }
 
 def format_report(stats: Dict) -> str:
-    """Форматирование отчета"""
+    """Форматирование отчета в стиле вашего примера"""
     date_from = stats['date_from']
     date_to = stats['date_to']
     
@@ -317,7 +347,6 @@ async def test_api(message: types.Message):
     date_to = datetime.now().strftime("%Y-%m-%d")
     date_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     
-    # Проверяем оба эндпоинта
     ops = await api.get_operations(date_from, date_to)
     prods = await api.get_products_expense(date_from, date_to)
     
@@ -325,13 +354,18 @@ async def test_api(message: types.Message):
     
     result_text = f"✅ *API ПРОВЕРКА*\n\n"
     result_text += f"📊 all_operations_log: {'✅' if ops.get('status') else '❌'} ({len(ops.get('data', []))} записей)\n"
-    result_text += f"📊 products/expense: {'✅' if prods.get('status') else '❌'} ({len(prods.get('data', []))} записей)\n\n"
+    result_text += f"📊 products/expense (клуб {CLUB_ID}): {'✅' if prods.get('status') else '❌'} ({len(prods.get('data', []))} записей)\n\n"
     
     if prods.get('status') and prods.get('data'):
-        sample = prods['data'][:3]
-        result_text += f"📋 Примеры товаров:\n"
+        sample = prods['data'][:5]
+        result_text += f"📋 *Примеры товаров:*\n"
         for s in sample:
-            result_text += f"• {s.get('name')} — {s.get('price_sale')} ₽ x {s.get('count')}\n"
+            name = s.get('name', '—')
+            price = s.get('price_sale', '—')
+            count = s.get('count', '—')
+            result_text += f"• {name} — {price} ₽ x {count}\n"
+    else:
+        result_text += f"⚠️ Нет данных о товарах для клуба {CLUB_ID}\n"
     
     await message.answer(result_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
@@ -360,7 +394,7 @@ async def make_report(message: types.Message, days: int, title: str, use_full_fo
         await message.answer("❌ API ключ не настроен!")
         return
     
-    msg = await message.answer(f"📊 Сбор статистики {title.lower()}...\n⏱️ Подождите...")
+    msg = await message.answer(f"📊 Сбор статистики {title.lower()}...\n⏱️ Подождите до 30 секунд...")
     
     date_to = datetime.now().replace(hour=23, minute=59, second=59)
     date_from = date_to - timedelta(days=days - 1)
@@ -487,7 +521,7 @@ async def main():
     logger.info("🚀 LANGAME Аналитика бот запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
     if API_KEY:
-        logger.info("✅ API ключ настроен")
+        logger.info(f"✅ API ключ настроен, клуб ID: {CLUB_ID}")
     logger.info("🎉 Бот готов!")
     await dp.start_polling(bot)
 
