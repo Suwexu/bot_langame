@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-from datetime import datetime, timedelta
 
 import aiohttp
 from aiogram import Bot, Dispatcher
@@ -28,16 +27,18 @@ dp = Dispatcher()
 
 
 class LangameAPI:
+
     def __init__(self, api_key):
         self.api_key = api_key
 
     async def request(self, endpoint, params=None):
-        url = f"{API_BASE_URL}{endpoint}"
 
         headers = {
             "X-Request-Token": self.api_key,
             "Content-Type": "application/json"
         }
+
+        url = f"{API_BASE_URL}{endpoint}"
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -48,6 +49,7 @@ class LangameAPI:
                     timeout=120
                 ) as response:
 
+                    logger.info("=" * 120)
                     logger.info(f"URL: {response.url}")
                     logger.info(f"STATUS: {response.status}")
 
@@ -62,15 +64,6 @@ class LangameAPI:
             logger.exception("REQUEST ERROR")
             return {"error": str(e)}
 
-    async def products_expense(self, date_from, date_to):
-        return await self.request(
-            "/products/expense",
-            {
-                "date_from": date_from,
-                "date_to": date_to
-            }
-        )
-
 
 api = LangameAPI(API_KEY)
 
@@ -78,50 +71,74 @@ api = LangameAPI(API_KEY)
 @dp.message(Command("start"))
 async def start(message: Message):
     await message.answer(
-        "Тестовый бот запущен.\n\n"
-        "/products - проверить products/expense"
+        "Тестовый бот Langame\n\n"
+        "/products - продажи товаров\n"
+        "/goods - список товаров"
     )
 
 
 @dp.message(Command("products"))
 async def products(message: Message):
 
-    await message.answer("Запрашиваю данные...")
+    await message.answer("Получаю продажи товаров...")
 
-    date_to = datetime.now()
-    date_from = date_to - timedelta(days=7)
-
-    result = await api.products_expense(
-        date_from.strftime("%Y-%m-%d"),
-        date_to.strftime("%Y-%m-%d")
+    result = await api.request(
+        "/products/expense"
     )
 
     logger.info("=" * 120)
-    logger.info("FULL RESPONSE:")
+    logger.info("PRODUCTS RESPONSE:")
     logger.info(result)
     logger.info("=" * 120)
 
-    if isinstance(result, dict):
+    data = result.get("data", [])
 
-        data = result.get("data")
+    logger.info(f"ITEMS COUNT: {len(data)}")
 
-        if isinstance(data, list):
+    for i, item in enumerate(data[:20]):
+        logger.info(f"PRODUCT #{i + 1}")
+        logger.info(item)
+        logger.info("-" * 80)
 
-            logger.info(f"ITEMS COUNT: {len(data)}")
+    await message.answer("Готово. Смотри Railway Logs.")
 
-            for i, item in enumerate(data[:10]):
-                logger.info(f"ITEM #{i + 1}")
-                logger.info(item)
-                logger.info("-" * 80)
 
-    await message.answer(
-        "Готово.\n"
-        "Смотри логи Railway."
+@dp.message(Command("goods"))
+async def goods(message: Message):
+
+    await message.answer("Получаю справочник товаров...")
+
+    result = await api.request(
+        "/products/list"
     )
+
+    logger.info("=" * 120)
+    logger.info("GOODS RESPONSE:")
+    logger.info(result)
+    logger.info("=" * 120)
+
+    data = result.get("data", [])
+
+    logger.info(f"GOODS COUNT: {len(data)}")
+
+    for i, item in enumerate(data[:50]):
+        logger.info(f"GOOD #{i + 1}")
+        logger.info(item)
+        logger.info("-" * 80)
+
+    await message.answer("Готово. Смотри Railway Logs.")
 
 
 async def main():
+
     logger.info("BOT STARTED")
+
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN not found")
+
+    if not API_KEY:
+        raise ValueError("LANGAME_API_KEY not found")
+
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
