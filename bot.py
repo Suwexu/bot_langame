@@ -140,57 +140,47 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     unique_guests = set()
     club_name = "CyberX Краснодар Коммунаров"
     
-    # Ключевые слова для определения продаж бара
-    bar_keywords = [
-        "бургер", "пицца", "кофе", "чай", "сок", "вода", "кола", "пепси", "спрайт",
-        "сэндвич", "наггетс", "картошка", "фрай", "кока-кола", "липтон", "фанта",
-        "энергетик", "смузи", "капучино", "латте", "американо", "флеш", "добрый",
-        "берн", "хрустальная", "сникерс", "баунти", "твикс", "милка", "лейс",
-        "принглс", "китКат", "орео", "кальян", "пиво", "монстер"
+    # Список товаров, которые НЕ должны попадать в выручку
+    # (они уже учитываются в products/expense для топа, но не для выручки)
+    exclude_products = [
+        "Монстер", "Берн", "Импор", "Пиво", "Добрый", "Флеш", "Сникерс",
+        "Баунти", "Твикс", "Милка", "Лейс", "Принглс", "Кальян", "Липтон",
+        "Кола", "Спрайт", "Фанта", "Энергетик", "Чиабатта", "Кацу", "Хот-дог"
     ]
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
-        op_name = item.get("name", "").lower()
-        original_name = item.get("name", "")
-        op_source = item.get("source", "")
+        op_name = item.get("name", "")
+        op_name_lower = op_name.lower()
         club_name = item.get("club_name", club_name)
         
-        # 1. ПОПОЛНЕНИЯ (все, включая админ, МП, ЛК, исключая возвраты)
-        is_income = False
+        # ТОЛЬКО РЕАЛЬНЫЕ ПОПОЛНЕНИЯ (без возвратов и без товаров)
+        is_valid_income = False
         if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
-            if "возврат" not in op_name:
-                is_income = True
-        
-        if is_income:
-            total_income += op_sum
-            logger.debug(f"Пополнение: +{op_sum} ₽ | {original_name[:50]}")
-        
-        # 2. ПРОДАЖИ БАРА (добавляем к выручке)
-        is_bar_sale = False
-        if (op_type == "Списание" or op_type == "minus") and op_sum > 0:
-            # Продажи через админку или терминал
-            if op_source in ["admin", "terminal"]:
-                is_bar_sale = True
-            # Или по ключевым словам
-            for keyword in bar_keywords:
-                if keyword in op_name:
-                    is_bar_sale = True
+            # Исключаем возвраты
+            if "возврат" in op_name_lower:
+                continue
+            # Исключаем продажи товаров (они идут как plus, но это не пополнения)
+            is_product = False
+            for product in exclude_products:
+                if product in op_name:
+                    is_product = True
                     break
+            if not is_product:
+                is_valid_income = True
         
-        if is_bar_sale:
+        if is_valid_income:
             total_income += op_sum
-            logger.debug(f"Продажа бара: +{op_sum} ₽ | {original_name[:50]}")
+            logger.debug(f"Пополнение: +{op_sum} ₽ | {op_name[:50]}")
         
-        # 3. ПОДСЧЕТ СЕССИЙ
-        if "сессия" in op_name or "session" in op_name:
+        # Подсчет сессий
+        if "сессия" in op_name_lower or "session" in op_name_lower:
             sessions_count += 1
         
-        # 4. УНИКАЛЬНЫЕ ГОСТИ
-        guest_name = item.get("name", "")
-        if guest_name and len(guest_name) > 3 and "пополнение" not in op_name:
-            unique_guests.add(guest_name[:30])
+        # Уникальные гости
+        if op_name and len(op_name) > 3 and "пополнение" not in op_name_lower:
+            unique_guests.add(op_name[:30])
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
@@ -329,7 +319,7 @@ async def about(message: types.Message):
         "🤖 *LANGAME АНАЛИТИКА v7.0*\n\n"
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
-        "• Анализ выручки за любой период (пополнения + продажи бара)\n"
+        "• Анализ выручки за любой период (только пополнения, без товаров)\n"
         "• Топ товаров (количество × цена)\n"
         "• Статистика сессий\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД",
