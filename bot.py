@@ -68,7 +68,7 @@ class LangameAPI:
     async def get_clubs(self) -> Dict:
         return await self._request("/clubs/list")
     
-    async def get_operations((self, date_from: str, date_to: str) -> Dict:
+    async def get_operations(self, date_from: str, date_to: str) -> Dict:
         return await self._request("/all_operations_log/list", params={"date_from": date_from, "date_to": date_to})
     
     async def get_products_list(self) -> Dict:
@@ -127,12 +127,11 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
                 total_income -= op_sum
             continue
             
-        # 2. ФИЛЬТР ТЕХНИЧЕСКИХ ОПЕРАЦИЙ (Игнорируем "Статистика и балансы гостей", корректировки и пустые источники)
+        # 2. ФИЛЬТР ТЕХНИЧЕСКИХ ОПЕРАЦИЙ (Игнорируем "Статистика и балансы гостей", корректировки)
         if "статистика" in op_name_lower or "баланс" in op_name_lower or "корректировка" in op_name_lower:
             continue
             
-        # 3. УЧЕТ ТРАНЗАКЦИЙ ТОЛЬКО ИЗ РЕАЛЬНЫХ ФИНАНСОВЫХ ИСТОЧНИКОВ
-        # Разрешенные источники: admin (касса), cabinet (ЛК), mp/app (приложение), terminal (терминал), mlm (внешние шлюзы)
+        # 3. УЧЕТ ТРАНЗАКЦИЙ ИЗ РЕАЛЬНЫХ ФИНАНСОВЫХ ИСТОЧНИКОВ
         if any(src in op_source for src in ["admin", "cabinet", "mp", "app", "terminal", "mlm"]) or op_type == "Пополнение":
             if not any(word in op_name_lower for word in ["возврат", "отмена", "cancel"]):
                 total_income += op_sum
@@ -230,7 +229,7 @@ async def start(message: types.Message):
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v12.0*\n\nВнедрен умный сквозной фильтр источников транзакций.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v12.1*\n\nИсправлена синтаксическая ошибка, расчеты полностью динамические.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
