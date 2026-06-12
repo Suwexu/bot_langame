@@ -43,14 +43,11 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 def safe_float(value: Any) -> float:
-    if value is None:
-        return 0
     try:
         if isinstance(value, str):
-            cleaned = value.replace(',', '.').strip()
-            return float(cleaned) if cleaned else 0
-        return float(value)
-    except (ValueError, TypeError):
+            return float(value.replace(',', '.')) if value else 0
+        return float(value) if value else 0
+    except:
         return 0
 
 # ========== API КЛИЕНТ ==========
@@ -102,20 +99,13 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     
     logger.info(f"Operations data count: {len(operations_data)}")
     
-    # ДЛЯ ОТЛАДКИ: выводим первые 3 операции с их типами
-    if operations_data:
-        logger.info("=== ПРИМЕРЫ ОПЕРАЦИЙ (для отладки) ===")
-        for i, item in enumerate(operations_data[:5]):
-            logger.info(f"Операция {i+1}: type='{item.get('type', 'НЕТ')}', name='{item.get('name', '')[:50]}', sum={item.get('sum', 0)}")
-    
     total_income = 0
     sessions_count = 0
     unique_guests = set()
-    
-    # {название: {"count": количество_продаж, "total": общая_выручка}}
-    product_stats = defaultdict(lambda: {"count": 0, "total": 0})
-    
     club_name = "CyberX Краснодар Коммунаров"
+    
+    # СТРУКТУРА ДЛЯ ТОВАРОВ: {название: {"count": количество, "total": общая_сумма}}
+    product_stats = defaultdict(lambda: {"count": 0, "total": 0})
     
     # Ключевые слова для определения товаров бара
     food_keywords = [
@@ -123,7 +113,8 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         "сэндвич", "наггетс", "картошка", "фрай", "кока-кола", "липтон", "фанта",
         "энергетик", "смузи", "капучино", "латте", "американо", "флеш", "добрый",
         "берн", "хрустальная", "сникерс", "баунти", "твикс", "милка", "лейс",
-        "принглс", "китКат", "орео", "кальян", "пиво"
+        "принглс", "китКат", "орео", "кальян", "пиво", "чиабатта", "кацу",
+        "чебупели", "чебупицца", "ходстеры"
     ]
     
     for item in operations_data:
@@ -133,17 +124,8 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         original_name = item.get("name", "")
         club_name = item.get("club_name", club_name)
         
-        # Пробуем разные варианты определения пополнения
-        # ВАЖНО: в API может быть "plus" или "Пополнение"
-        is_income = False
+        # Пополнения (выручка)
         if op_type == "Пополнение" and op_sum > 0:
-            is_income = True
-        elif op_type == "plus" and op_sum > 0:
-            is_income = True
-        elif "пополнение" in op_name and op_sum > 0:
-            is_income = True
-        
-        if is_income:
             total_income += op_sum
         
         # Подсчет сессий
@@ -152,31 +134,33 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         
         # Уникальные гости
         guest_name = item.get("name", "")
-        if guest_name and len(guest_name) > 3 and not is_income:
+        if guest_name and len(guest_name) > 3 and op_type != "Пополнение":
             unique_guests.add(guest_name[:30])
         
-        # Подсчет продаж бара
-        if op_sum > 0 and len(op_name) > 3 and not is_income:
-            is_product = False
+        # ПОДСЧЕТ ПРОДАЖ ТОВАРОВ
+        # ВАЖНО: проверяем что это списание (расход), а не пополнение
+        if op_type == "Списание" and op_sum > 0 and len(op_name) > 3:
             for keyword in food_keywords:
                 if keyword in op_name:
-                    is_product = True
+                    # УВЕЛИЧИВАЕМ СЧЕТЧИК КОЛИЧЕСТВА ПРОДАЖ
+                    product_stats[original_name]["count"] += 1
+                    # СУММИРУЕМ ОБЩУЮ ВЫРУЧКУ
+                    product_stats[original_name]["total"] += op_sum
+                    logger.debug(f"Товар: {original_name} | +{op_sum} ₽ | Всего: {product_stats[original_name]['count']} шт. | Сумма: {product_stats[original_name]['total']} ₽")
                     break
-            
-            if is_product and original_name:
-                product_stats[original_name]["count"] += 1
-                product_stats[original_name]["total"] += op_sum
     
-    # Формируем топ товаров по общей выручке
+    # ФОРМИРУЕМ ТОП ТОВАРОВ
+    # Каждый товар представляем с количеством, средней ценой и общей суммой
     top_products = []
     for name, data in product_stats.items():
         top_products.append({
             "name": name,
             "count": data["count"],
-            "total": data["total"],
-            "avg_price": data["total"] / data["count"] if data["count"] > 0 else 0
+            "avg_price": data["total"] / data["count"] if data["count"] > 0 else 0,
+            "total": data["total"]
         })
     
+    # СОРТИРУЕМ ПО ОБЩЕЙ СУММЕ (количество × цена)
     top_products.sort(key=lambda x: x["total"], reverse=True)
     top_products = top_products[:15]
     
@@ -186,6 +170,7 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
     avg_daily = total_income / days_count if days_count > 0 else 0
     
+    # ВЫВОДИМ В ЛОГ ТОП ТОВАРОВ ДЛЯ ОТЛАДКИ
     logger.info(f"ИТОГО: выручка={total_income}, продажи={bar_revenue}, сессии={sessions_count}")
     logger.info(f"Найдено товаров: {len(product_stats)}")
     for p in top_products[:5]:
@@ -245,9 +230,9 @@ def format_stats_message(stats: Dict, title: str) -> str:
 🏆 *Топ тарифов:*\n"""
     
     if stats['top_products']:
-        for name, amount in stats['top_products'][:3]:
-            short_name = name[:25] + "..." if len(name) > 25 else name
-            result += f"• {short_name} ({amount:,.0f} ₽)\n"
+        for product in stats['top_products'][:3]:
+            short_name = product['name'][:25] + "..." if len(product['name']) > 25 else product['name']
+            result += f"• {short_name} ({product['total']:,.0f} ₽)\n"
     else:
         result += "• Нет данных\n"
     
@@ -259,9 +244,9 @@ def format_stats_message(stats: Dict, title: str) -> str:
 🍔 *Топ товаров бара:*\n"""
     
     if stats['top_products']:
-        for i, product in enumerate(stats['top_products'][:5], 1):
-            name = product['name'][:35] + "..." if len(product['name']) > 35 else product['name']
-            result += f"{i}. *{name}*\n"
+        for product in stats['top_products'][:5]:
+            short_name = product['name'][:25] + "..." if len(product['name']) > 25 else product['name']
+            result += f"• {short_name}\n"
             result += f"   📦 {product['count']} шт. × {product['avg_price']:,.0f} ₽ = {product['total']:,.0f} ₽\n\n"
     else:
         result += "• Нет данных\n"
@@ -334,7 +319,7 @@ async def about(message: types.Message):
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
         "• Анализ выручки за любой период\n"
-        "• Топ товаров (с подсчетом количества и общей выручки)\n"
+        "• Топ товаров (количество × цена)\n"
         "• Статистика сессий\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД",
         parse_mode="Markdown",
@@ -356,16 +341,9 @@ async def test_api(message: types.Message):
     
     if operations.get("status"):
         data_count = len(operations.get("data", []))
-        
-        # Показываем примеры типов операций
-        sample_types = set()
-        for item in operations.get("data", [])[:20]:
-            sample_types.add(item.get("type", "unknown"))
-        
         await message.answer(
             f"✅ *API РАБОТАЕТ!*\n\n"
-            f"📊 Найдено операций за 7 дней: {data_count}\n"
-            f"📋 Типы операций в выборке: {', '.join(sample_types)}\n\n"
+            f"📊 Найдено операций за 7 дней: {data_count}\n\n"
             f"Нажмите «📊 Выбрать период» для анализа",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
