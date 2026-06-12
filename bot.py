@@ -40,11 +40,6 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-def is_admin(user_id: int) -> bool:
-    if not ALLOWED_USERS:
-        return True
-    return user_id in ALLOWED_USERS
-
 def safe_float(value: Any) -> float:
     try:
         if isinstance(value, str):
@@ -78,19 +73,12 @@ class LangameAPI:
         except Exception as e:
             return {"status": False, "error": str(e)}
     
-    # ========== ОСНОВНЫЕ ЭНДПОИНТЫ ==========
-    async def get_balances_list(self, date_from: str, date_to: str, page: int = 1, limit: int = 100) -> Dict:
-        """Пополнения баланса - /balances/list"""
+    async def get_balances_list(self, date_from: str, date_to: str, page: int = 1, limit: int = 200) -> Dict:
         return await self._request("/balances/list", params={
             "date_from": date_from, "date_to": date_to, "page": page, "page_limit": limit
         })
     
-    async def get_guests_balance(self, page: int = 1, limit: int = 100) -> Dict:
-        """Балансы гостей - /guests/balance"""
-        return await self._request("/guests/balance", params={"page": page, "page_limit": limit})
-    
-    async def get_transactions(self, date_from: str = None, date_to: str = None, page: int = 1, limit: int = 100) -> Dict:
-        """Транзакции - /transactions/list"""
+    async def get_transactions(self, date_from: str = None, date_to: str = None, page: int = 1, limit: int = 200) -> Dict:
         params = {"page": page, "page_limit": limit}
         if date_from:
             params["date_from"] = date_from
@@ -99,7 +87,6 @@ class LangameAPI:
         return await self._request("/transactions/list", params=params)
     
     async def get_operations_log(self, date_from: str = None, date_to: str = None) -> Dict:
-        """Лог операций - /all_operations_log/list"""
         params = {}
         if date_from:
             params["date_from"] = date_from
@@ -108,11 +95,9 @@ class LangameAPI:
         return await self._request("/all_operations_log/list", params=params)
     
     async def get_working_shifts(self, page: int = 1, limit: int = 50) -> Dict:
-        """Смены - /working_shifts/list"""
         return await self._request("/working_shifts/list", params={"page": page, "page_limit": limit})
     
-    async def get_products_expense(self, date_from: str = None, date_to: str = None, page: int = 1, limit: int = 100) -> Dict:
-        """Продажи товаров - /products/expense"""
+    async def get_products_expense(self, date_from: str = None, date_to: str = None, page: int = 1, limit: int = 200) -> Dict:
         params = {"page": page, "page_limit": limit}
         if date_from:
             params["date_from"] = date_from
@@ -121,7 +106,6 @@ class LangameAPI:
         return await self._request("/products/expense", params=params)
     
     async def get_clubs(self) -> Dict:
-        """Клубы - /clubs/list"""
         return await self._request("/clubs/list")
 
 api = LangameAPI(API_KEY if API_KEY else "")
@@ -164,21 +148,21 @@ async def get_daily_stats(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
-    # Получаем данные из разных эндпоинтов
-    balances = await api.get_balances_list(date_from_str, date_to_str, limit=200)
-    transactions = await api.get_transactions(date_from_str, date_to_str, limit=200)
+    # Получаем данные
+    balances = await api.get_balances_list(date_from_str, date_to_str, limit=500)
     operations = await api.get_operations_log(date_from_str, date_to_str)
-    products = await api.get_products_expense(date_from_str, date_to_str, limit=200)
+    products = await api.get_products_expense(date_from_str, date_to_str, limit=500)
+    transactions = await api.get_transactions(date_from_str, date_to_str, limit=500)
     
     # Сбор статистики
     total_income = 0
     sessions_count = 0
     unique_guests = set()
-    product_sales = defaultdict(int)
+    product_sales = defaultdict(float)
     tariff_count = defaultdict(int)
     bar_revenue = 0
     
-    # Из balances (пополнения)
+    # 1. ИЗ BALANCES (пополнения) - основной источник выручки
     if balances.get("status") and balances.get("data"):
         for item in balances["data"]:
             amount = safe_float(item.get("amount", 0))
@@ -187,34 +171,31 @@ async def get_daily_stats(date_from: datetime, date_to: datetime) -> Dict:
             if guest_name:
                 unique_guests.add(guest_name)
     
-    # Из transactions (транзакции)
-    if transactions.get("status") and transactions.get("data"):
-        for item in transactions["data"]:
-            amount = safe_float(item.get("balance", 0))
-            if amount > 0:
-                total_income = max(total_income, amount)  # используем balances для точности
-    
-    # Из operations (лог операций)
+    # 2. ИЗ OPERATIONS (лог операций) - сессии и тарифы
     if operations.get("status") and operations.get("data"):
         for item in operations["data"]:
-            op_sum = safe_float(item.get("sum", 0))
-            op_type = item.get("type", "")
             op_name = item.get("name", "")
+            op_sum = safe_float(item.get("sum", 0))
             op_source = item.get("source", "")
+            op_form = item.get("form", "")
             
-            # Пополнения
-            if op_type == "Пополнение" and op_sum > 0:
-                total_income = max(total_income, op_sum)
-            
-            # Сессии
-            if "сессия" in op_name.lower() or "session" in op_name.lower():
+            # Подсчет сессий (по разным признакам)
+            if ("сессия" in op_name.lower() or 
+                "session" in op_name.lower() or
+                "запуск" in op_name.lower() or
+                "активация" in op_name.lower()):
                 sessions_count += 1
             
-            # Тарифы
-            if op_name and "тариф" in op_name.lower():
+            # Подсчет тарифов (по названию или источнику)
+            if op_name and any(x in op_name.lower() for x in ["тариф", "пакет", "час", "базовый", "игровой"]):
                 tariff_count[op_name] += 1
+            
+            # Альтернативный подсчет тарифов по источнику
+            if op_source in ["Терминал", "Касса", "Приложение"] and "сессия" in op_name.lower():
+                if op_name not in tariff_count:
+                    tariff_count[op_name] = tariff_count.get(op_name, 0) + 1
     
-    # Из products (продажи)
+    # 3. ИЗ PRODUCTS (продажи товаров) - выручка бара и топ товаров
     if products.get("status") and products.get("data"):
         for item in products["data"]:
             price = safe_float(item.get("price_sale", 0))
@@ -225,6 +206,13 @@ async def get_daily_stats(date_from: datetime, date_to: datetime) -> Dict:
             if name:
                 product_sales[name] += sale_sum
     
+    # 4. ИЗ TRANSACTIONS (транзакции) - для проверки выручки
+    if transactions.get("status") and transactions.get("data"):
+        for item in transactions["data"]:
+            amount = safe_float(item.get("balance", 0))
+            if amount > 0 and amount > total_income:
+                total_income = amount  # используем максимальное значение
+    
     # Средний чек
     avg_check = 0
     if transactions.get("status") and transactions.get("data"):
@@ -233,10 +221,19 @@ async def get_daily_stats(date_from: datetime, date_to: datetime) -> Dict:
             total_sum = sum(safe_float(t.get("balance", 0)) for t in positive_tx)
             avg_check = total_sum / len(positive_tx) if positive_tx else 0
     
-    # Топ товаров
+    # Если средний чек не найден через транзакции, пробуем через balances
+    if avg_check == 0 and balances.get("data"):
+        positive_items = [b for b in balances["data"] if safe_float(b.get("amount", 0)) > 0]
+        if positive_items:
+            total_sum = sum(safe_float(b.get("amount", 0)) for b in positive_items)
+            avg_check = total_sum / len(positive_items)
+    
+    # Топ товаров (очищаем от None и пустых строк)
+    product_sales = {k: v for k, v in product_sales.items() if k and len(k) > 2}
     top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:5]
     
     # Топ тарифов
+    tariff_count = {k: v for k, v in tariff_count.items() if k and len(k) > 2}
     top_tariffs = sorted(tariff_count.items(), key=lambda x: x[1], reverse=True)[:3]
     
     return {
@@ -331,7 +328,8 @@ async def stats_today(message: types.Message):
         
         if stats['top_tariffs']:
             for name, count in stats['top_tariffs']:
-                result += f"• {name[:30]} ({count} раз)\n"
+                short_name = name[:30] + "..." if len(name) > 30 else name
+                result += f"• {short_name} ({count} раз)\n"
         else:
             result += "• Нет данных\n"
         
@@ -384,7 +382,8 @@ async def stats_yesterday(message: types.Message):
         
         if stats['top_tariffs']:
             for name, count in stats['top_tariffs']:
-                result += f"• {name[:30]} ({count} раз)\n"
+                short_name = name[:30] + "..." if len(name) > 30 else name
+                result += f"• {short_name} ({count} раз)\n"
         else:
             result += "• Нет данных\n"
         
@@ -420,7 +419,6 @@ async def stats_week(message: types.Message):
         date_from_str = date_from.strftime("%Y-%m-%d")
         date_to_str = date_to.strftime("%Y-%m-%d")
         
-        # Получаем данные за неделю
         balances = await api.get_balances_list(date_from_str, date_to_str, limit=500)
         operations = await api.get_operations_log(date_from_str, date_to_str)
         products = await api.get_products_expense(date_from_str, date_to_str, limit=500)
@@ -437,9 +435,9 @@ async def stats_week(message: types.Message):
         if operations.get("status") and operations.get("data"):
             for item in operations["data"]:
                 op_name = item.get("name", "")
-                if "сессия" in op_name.lower():
+                if ("сессия" in op_name.lower() or "session" in op_name.lower()):
                     sessions_count += 1
-                if op_name and "тариф" in op_name.lower():
+                if op_name and any(x in op_name.lower() for x in ["тариф", "пакет", "час", "базовый"]):
                     tariff_count[op_name] += 1
         
         if products.get("status") and products.get("data"):
@@ -448,7 +446,6 @@ async def stats_week(message: types.Message):
                 count = safe_int(item.get("count", 0))
                 bar_revenue += price * count
         
-        # Средний чек
         transactions = await api.get_transactions(date_from_str, date_to_str, limit=500)
         avg_check = 0
         if transactions.get("status") and transactions.get("data"):
@@ -478,7 +475,8 @@ async def stats_week(message: types.Message):
         
         if top_tariffs:
             for name, count in top_tariffs:
-                result += f"• {name[:30]} ({count} раз)\n"
+                short_name = name[:30] + "..." if len(name) > 30 else name
+                result += f"• {short_name} ({count} раз)\n"
         else:
             result += "• Нет данных\n"
         
@@ -593,7 +591,7 @@ async def sales_report(message: types.Message):
         
         products = await api.get_products_expense(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"), limit=500)
         
-        product_sales = defaultdict(int)
+        product_sales = defaultdict(float)
         total_revenue = 0
         
         if products.get("status") and products.get("data"):
