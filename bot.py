@@ -23,7 +23,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("LANGAME_API_KEY")
 API_BASE_URL = "https://cyberx302.langame.ru/public_api"
 
-logging.basicConfig(level=logging.INFO)
+# Включаем DEBUG-логирование, чтобы в консоли видеть отсеченные операции
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN:
@@ -137,53 +138,52 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     unique_guests = set()
     club_name = "CyberX Краснодар Коммунаров"
     
-    # Ключевые слова для исключения услуг
-    service_keywords = ["сессия", "бронь", "абонемент", "подписка", "турнир"]
-    
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
         op_name = item.get("name", "")
-        op_name_lower = op_name.lower()
+        op_name_lower = op_name.lower() if op_name else ""
         op_source = item.get("source", "")
         club_name = item.get("club_name", club_name)
         
-        if op_sum == 0:
-            continue
-        
         is_valid = False
         
-        # 1. ПОПОЛНЕНИЯ (админ и ЛК, исключая возвраты)
+        # 1. Пополнения: Любой источник (admin, cabinet, app, site и т.д.), кроме возвратов
         if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
-            if "возврат" not in op_name_lower:
-                if op_source in ["admin", "cabinet"]:
-                    is_valid = True
+            if "возврат" not in op_name_lower and "cancel" not in op_name_lower and "отмена" not in op_name_lower:
+                is_valid = True
         
-        # 2. ПРОДАЖИ БАРА (minus, admin, исключая услуги)
-        elif (op_type == "Списание" or op_type == "minus") and op_sum > 0:
-            if op_source == "admin":
-                is_service = False
-                for keyword in service_keywords:
-                    if keyword in op_name_lower:
-                        is_service = True
-                        break
-                if not is_service:
+        # 2. Продажи бара / списания: Убираем жесткую привязку только к "admin"
+        # Учитываем продажи через ЛК/Приложения, если они оформлены как списание за товары
+        if (op_type == "Списание" or op_type == "minus") and op_sum > 0:
+            if "сессия" not in op_name_lower and "бронь" not in op_name_lower and "session" not in op_name_lower:
+                if "возврат" not in op_name_lower and "отмена" not in op_name_lower:
                     is_valid = True
         
         if is_valid:
             total_income += op_sum
+            logger.debug(f"➕ УЧТЕНО: {op_sum} ₽ | Тип: {op_type} | Источник: {op_source} | {op_name[:40]}")
+        else:
+            # Выводим в лог то, что не попало в отчет, для поиска расхождений
+            if op_sum > 0 and op_type in ["Пополнение", "plus", "Списание", "minus"]:
+                logger.debug(f"❌ ПРОПУЩЕНО: {op_sum} ₽ | Тип: {op_type} | Источник: {op_source} | Название: {op_name[:40]}")
         
-        # Сессии
-        if "сессия" in op_name_lower:
+        # Подсчет сессий
+        if "сессия" in op_name_lower or "session" in op_name_lower:
             sessions_count += 1
         
-        # Гости
+        # Подсчет гостей
         if op_name and len(op_name) > 3:
             unique_guests.add(op_name[:30])
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
     avg_daily = total_income / days_count if days_count > 0 else 0
+    
+    logger.info("=" * 60)
+    logger.info(f"✅ ИТОГОВАЯ ВЫРУЧКА В ЛОГЕ: {total_income:,.0f} ₽")
+    logger.info(f"🎮 Сессии: {sessions_count} | 👥 Гости: {len(unique_guests)}")
+    logger.info("=" * 60)
     
     return {
         "total_income": total_income,
@@ -308,10 +308,11 @@ async def start(message: types.Message):
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
     await message.answer(
-        "🤖 *LANGAME АНАЛИТИКА v10.0*\n\n"
+        "🤖 *LANGAME АНАЛИТИКА v8.1*\n\n"
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
-        "• Анализ выручки за любой период\n"
+        "• Анализ выручки за любой период (все пополнения + продажи бара)\n"
+        "• Автоматический учет транзакций из внешних источников\n"
         "• Топ товаров (количество × цена)\n"
         "• Статистика сессий\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД",
