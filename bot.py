@@ -18,22 +18,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ========== КОНФИГУРАЦИЯ ==========
+# ========== CONFIGURATION ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("LANGAME_API_KEY")
 API_BASE_URL = "https://cyberx302.langame.ru/public_api"
 
-# Настройка логирования (DEBUG поможет видеть каждую операцию в консоли)
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не указан!")
+    raise ValueError("BOT_TOKEN is missing!")
 
-if not API_KEY:
-    logger.warning("LANGAME_API_KEY не указан!")
-
-# ========== СОСТОЯНИЯ FSM ==========
+# ========== STATES ==========
 class PeriodState(StatesGroup):
     waiting_date_from = State()
     waiting_date_to = State()
@@ -50,7 +46,7 @@ def safe_float(value: Any) -> float:
     except:
         return 0
 
-# ========== API КЛИЕНТ LANGAME ==========
+# ========== LANGAME API CLIENT ==========
 class LangameAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -88,7 +84,7 @@ class LangameAPI:
 
 api = LangameAPI(API_KEY if API_KEY else "")
 
-# ========== КЛАВИАТУРА ==========
+# ========== KEYBOARDS ==========
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(text="📊 Выбрать период")],
@@ -97,7 +93,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== ПОЛУЧЕНИЕ ТОПА ТОВАРОВ ==========
+# ========== TOP PRODUCTS SEARCH ==========
 async def get_top_products(date_from: datetime, date_to: datetime) -> list:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
@@ -111,7 +107,6 @@ async def get_top_products(date_from: datetime, date_to: datetime) -> list:
     total_pages = first_page.get("total_pages", 1)
     
     revenue = defaultdict(float)
-    
     for page in range(1, total_pages + 1):
         data = await api.get_products_expense(date_from_str, date_to_str, page)
         for sale in data.get("data", []):
@@ -125,7 +120,7 @@ async def get_top_products(date_from: datetime, date_to: datetime) -> list:
     
     return sorted(revenue.items(), key=lambda x: x[1], reverse=True)[:15]
 
-# ========== АНАЛИТИКА И РАСЧЕТ ВЫРУЧКИ ==========
+# ========== FINANCIAL CALCULATIONS ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
@@ -146,24 +141,28 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         op_source = item.get("source", "")
         club_name = item.get("club_name", club_name)
         
-        # 1. ПРИХОД ЖИВЫХ ДЕНЕГ (plus): Пополнения, Бары, ЛК, МП, MLM-системы
-        if (op_type == "Пополнение" or op_type == "plus") and op_sum > 0:
-            # Исключаем технические логи пополнений, содержащие ключевые слова отмен
-            if "возврат" not in op_name_lower and "cancel" not in op_name_lower and "отмена" not in op_name_lower:
-                total_income += op_sum
-                logger.debug(f"➕ ПРИХОД: {op_sum} ₽ | Тип: {op_type} | Источник: {op_source} | {op_name[:40]}")
-                
-        # 2. ВЫЧЕТ ВОЗВРАТОВ (minus): Если оформлен реальный возврат денежных средств гостю
-        if (op_type == "Списание" or op_type == "minus") and op_sum > 0:
+        # Защита от пустых логов
+        if op_sum <= 0:
+            continue
+            
+        # 1. СТРОГИЙ КРИТЕРИЙ ИСКЛЮЧЕНИЯ ВНУТРЕННЕГО ОБОРОТА
+        # Списание баланса на сессию, оплата компьютеров и автоматическая инкассация НЕ являются притоком денег
+        if "списание баланса" in op_name_lower or "инкассация" in op_name_lower or op_type == "minus" or op_type == "Списание":
+            # Но проверяем, не является ли это списание ВОЗВРАТОМ денег клиенту
             if "возврат" in op_name_lower or "отмена" in op_name_lower or "cancel" in op_name_lower:
                 total_income -= op_sum
-                logger.debug(f"➖ ВЫЧЕТ (Возврат): -{op_sum} ₽ | Тип: {op_type} | Название: {op_name[:40]}")
-        
-        # Подсчет сессий (для статистики)
+                logger.debug(f"➖ ВЫЧЕТ (Возврат ДС): -{op_sum} ₽ | {op_name[:40]}")
+            continue
+
+        # 2. УЧЕТ ВСЕХ ОСТАЛЬНЫХ ПОЛОЖИТЕЛЬНЫХ ОПЕРАЦИЙ (ДОХОД)
+        # Сюда попадают: Пополнения (admin, cabinet, mlm, mp), а также прямые продажи товаров кассы
+        if "возврат" not in op_name_lower and "cancel" not in op_name_lower and "отмена" not in op_name_lower:
+            total_income += op_sum
+            logger.debug(f"➕ ДОХОД УЧТЕН: {op_sum} ₽ | Источник: {op_source} | Тип: {op_type} | {op_name[:40]}")
+
+        # Статистические счетчики
         if "сессия" in op_name_lower or "session" in op_name_lower or "списание баланса" in op_name_lower:
             sessions_count += 1
-        
-        # Подсчет уникальных гостей
         if op_name and len(op_name) > 3 and "баланса" in op_name_lower:
             unique_guests.add(op_name[:30])
     
@@ -177,21 +176,16 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         "sessions_count": sessions_count,
         "unique_guests": len(unique_guests),
         "avg_daily": avg_daily,
-        "club_name": club_name,
-        "raw_operations": len(operations_data)
+        "club_name": club_name
     }
 
-# ========== ФОРМАТИРОВАНИЕ ОТЧЕТОВ ==========
+# ========== FORMATTING ==========
 def format_simple_stats(stats: Dict, title: str, top_products: list) -> str:
     date_from = stats['period_from']
     date_to = stats['period_to']
+    period_str = date_from.strftime('%d.%m.%Y') if date_from.date() == date_to.date() else f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
     
-    if date_from.date() == date_to.date():
-        period_str = date_from.strftime('%d.%m.%Y')
-    else:
-        period_str = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-    
-    result = f"""📊 *{title}*
+    return f"""📊 *{title}*
 
 📅 Период: {period_str}
 
@@ -204,45 +198,16 @@ def format_simple_stats(stats: Dict, title: str, top_products: list) -> str:
 • Уникальных гостей: {stats['unique_guests']}
 • Средняя выручка в день: {stats['avg_daily']:,.0f} ₽
 
-🍔 *Топ товаров:*\n"""
-    
-    if top_products:
-        for i, (name, amount) in enumerate(top_products[:10], 1):
-            short_name = name[:30] + "..." if len(name) > 30 else name
-            result += f"{i}. {short_name} — {amount:,.0f} ₽\n"
-    else:
-        result += "• Нет данных\n"
-    
-    result += f"\n#отчет"
-    return result
+🍔 *Топ товаров:*
+""" + ("\n".join([f"{i}. {n[:30]} — {a:,.0f} ₽" for i, (n, a) in enumerate(top_products[:10], 1)]) if top_products else "• Нет данных") + "\n\n#отчет"
 
 def format_full_report(stats: Dict, top_products: list) -> str:
     date_from = stats['period_from']
     date_to = stats['period_to']
+    period_str = date_from.strftime('%d.%m.%Y') if date_from.date() == date_to.date() else f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
     
-    if date_from.date() == date_to.date():
-        period_str = date_from.strftime('%d.%m.%Y')
-    else:
-        period_str = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-    
-    date_name = date_from.strftime("%A, %d %B %Y")
-    weekdays = {
-        "Monday": "Понедельник", "Tuesday": "Вторник", "Wednesday": "Среда",
-        "Thursday": "Четверг", "Friday": "Пятница", "Saturday": "Суббота", "Sunday": "Воскресенье"
-    }
-    months = {
-        "January": "января", "February": "февраля", "March": "марта",
-        "April": "апреля", "May": "мая", "June": "июня",
-        "July": "июля", "August": "августа", "September": "сентября",
-        "October": "октября", "November": "ноября", "December": "декабря"
-    }
-    for eng, rus in weekdays.items():
-        date_name = date_name.replace(eng, rus)
-    for eng, rus in months.items():
-        date_name = date_name.replace(eng, rus)
-    
-    result = f"""📊 *ДАННЫЕ {stats['club_name']}*
-{date_name}
+    return f"""📊 *ДАННЫЕ {stats['club_name']}*
+📅 Период: {period_str}
 
 💰 *Финансы:*
 • Выручка: {stats['total_income']:,.0f} ₽
@@ -251,128 +216,59 @@ def format_full_report(stats: Dict, top_products: list) -> str:
 🎮 *Сессии:* {stats['sessions_count']} (гостей: {stats['unique_guests']})
 
 🏆 *Топ тарифов:*
-• Настройка доступна в панели управления Langame
+• См. в панели управления Langame
 
-🍔 *Топ товаров бара:*\n"""
-    
-    if top_products:
-        for i, (name, amount) in enumerate(top_products[:5], 1):
-            short_name = name[:25] + "..." if len(name) > 25 else name
-            result += f"{i}. {short_name} — {amount:,.0f} ₽\n"
-    else:
-        result += "• Нет данных\n"
-    
-    result += f"""
+🍔 *Топ товаров бара:*
+""" + ("\n".join([f"{i}. {n[:25]} — {a:,.0f} ₽" for i, (n, a) in enumerate(top_products[:5], 1)]) if top_products else "• Нет данных") + f"""
+
 📈 *Аналитика:*
 • Средний чек: {stats['avg_check']:,.0f} ₽
 
 #дайджест #ежедневный"""
-    
-    return result
 
-# ========== ОБРАБОТЧИКИ СООБЩЕНИЙ ==========
+# ========== TELEGRAM HANDLERS ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer(
-        "📊 *LANGAME АНАЛИТИКА*\n\n"
-        "Бот для точного анализа финансовых показателей игрового клуба.\n\n"
-        "📋 *Как использовать:*\n"
-        "• «📊 Выбрать период» — анализ за любой период\n"
-        "• «📈 Быстрый отчет» — отчет за сегодня\n"
-        "• «🏢 Список клубов» — список клубов\n\n"
-        "📅 *Формат даты:* `ГГГГ-ММ-ДД`\n"
-        "Пример: `2026-06-01`",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
-    )
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот готов к расчету точной выручки без двойного учета.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer(
-        "🤖 *LANGAME АНАЛИТИКА v8.3*\n\n"
-        "Инструмент синхронизации данных из логов API Langame с финансовой отчетностью Excel.\n\n"
-        "📊 *Особенности:* \n"
-        "• Полностью исключен двойной учет внутренних списаний баланса гостя\n"
-        "• Настроен сквозной учет всех внешних шлюзов (МП/ЛК/Терминалы/MLM)\n"
-        "• Автоматический вычет возвратов денежных средств\n"
-        "• Топ-15 товаров бара по доходу\n\n"
-        "📅 *Формат ручного ввода дат:* ГГГГ-ММ-ДД",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
-    )
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v9.0*\n\nИсправлен учет MLM-систем и прямых продаж баров.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    msg = await message.answer("🔄 Проверка подключения к серверам Langame...")
-    
-    date_to = datetime.now().strftime("%Y-%m-%d")
-    date_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    
-    result = await api.get_products_expense(date_from, date_to)
+    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
+    msg = await message.answer("🔄 Проверка связи...")
+    res = await api.get_products_list()
     await msg.delete()
-    
-    if result.get("status"):
-        data_count = len(result.get("data", []))
-        await message.answer(
-            f"✅ *API РАБОТАЕТ СТАБИЛЬНО!*\n\n"
-            f"📊 Найдено записей по бару за последние 7 дней: {data_count}\n\n"
-            f"Нажмите кнопку «📊 Выбрать период» для запуска расчетов.",
-            parse_mode="Markdown",
-            reply_markup=get_main_keyboard()
-        )
+    if res.get("status"):
+        await message.answer("✅ Подключение успешно выполнено!", reply_markup=get_main_keyboard())
     else:
-        await message.answer(f"❌ Ошибка подключения: {result.get('error')}", reply_markup=get_main_keyboard())
+        await message.answer(f"❌ Ошибка: {res.get('error')}", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🏢 Список клубов")
 async def clubs_list(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    
-    msg = await message.answer("🔄 Загрузка списка подключенных филиалов...")
     r = await api.get_clubs()
-    await msg.delete()
-    
     if r.get("status") and r.get("data"):
-        result = "🏢 *СПИСОК ДОСТУПНЫХ КЛУБОВ*\n\n"
-        for club in r["data"]:
-            status = "🟢" if club.get("active") else "🔴"
-            result += f"{status} *{club.get('name', '—')}* — ID: `{club.get('id')}`\n"
-        await message.answer(result, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        res = "🏢 *СПИСОК КЛУБОВ*:\n\n" + "\n".join([f"🟢 *{c.get('name')}* (ID: `{c.get('id')}`)" for c in r["data"]])
+        await message.answer(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
     else:
-        await message.answer(f"❌ {r.get('error', 'Не удалось получить данные о клубах')}", reply_markup=get_main_keyboard())
+        await message.answer("❌ Ошибка получения списка клубов", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📈 Быстрый отчет")
 async def quick_report(message: types.Message):
-    if not API_KEY:
-        await message.answer("❌ API ключ не настроен!")
-        return
-    
-    msg = await message.answer("📊 Сбор статистики за сегодня...\n⏱️ Пожалуйста, подождите...")
-    
+    msg = await message.answer("📊 Сбор статистики...")
     date_to = datetime.now()
     date_from = date_to.replace(hour=0, minute=0, second=0, microsecond=0)
-    
     stats = await get_stats_for_period(date_from, date_to)
-    stats["period_from"] = date_from
-    stats["period_to"] = date_to
-    
-    top_products = await get_top_products(date_from, date_to)
-    
+    stats["period_from"], stats["period_to"] = date_from, date_to
+    top_p = await get_top_products(date_from, date_to)
     await msg.delete()
-    await message.answer(format_full_report(stats, top_products), parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer(format_full_report(stats, top_p), parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📊 Выбрать период")
 async def select_period_start(message: types.Message, state: FSMContext):
-    await message.answer(
-        "📅 Введите *дату начала* отчетного периода в формате:\n\n"
-        "`ГГГГ-ММ-ДД`\n\n"
-        "📌 *Пример:* `2026-06-01`",
-        parse_mode="Markdown"
-    )
+    await message.answer("📅 Введите дату начала в формате `ГГГГ-ММ-ДД` (например, `2026-06-01`):", parse_mode="Markdown")
     await state.set_state(PeriodState.waiting_date_from)
 
 @dp.message(StateFilter(PeriodState.waiting_date_from))
@@ -380,15 +276,10 @@ async def select_period_date_from(message: types.Message, state: FSMContext):
     try:
         date_from = datetime.strptime(message.text.strip(), "%Y-%m-%d")
         await state.update_data(date_from=date_from)
-        await message.answer(
-            "📅 Введите *дату окончания* периода в формате:\n\n"
-            "`ГГГГ-ММ-ДД`\n\n"
-            "📌 *Пример:* `2026-06-30`",
-            parse_mode="Markdown"
-        )
+        await message.answer("📅 Введите дату окончания в формате `ГГГГ-ММ-ДД`:", parse_mode="Markdown")
         await state.set_state(PeriodState.waiting_date_to)
     except ValueError:
-        await message.answer("❌ Неверный формат! Используйте строгий шаблон: `ГГГГ-ММ-ДД`", parse_mode="Markdown")
+        await message.answer("❌ Неверный формат! Используйте: `ГГГГ-ММ-ДД`")
 
 @dp.message(StateFilter(PeriodState.waiting_date_to))
 async def select_period_execute(message: types.Message, state: FSMContext):
@@ -396,61 +287,31 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         date_to = datetime.strptime(message.text.strip(), "%Y-%m-%d")
         data = await state.get_data()
         date_from = data.get("date_from")
-        
         if date_from > date_to:
-            await message.answer("❌ Ошибка: дата начала не может быть позже даты окончания!")
+            await message.answer("❌ Дата начала не может быть позже даты окончания!")
             await state.clear()
             return
         
         date_from = date_from.replace(hour=0, minute=0)
         date_to = date_to.replace(hour=23, minute=59)
-        
-        msg = await message.answer(f"📊 Расчет показателей за {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}...\n⏱️ Выгрузка логов...")
+        msg = await message.answer("📊 Формирование отчета...")
         
         stats = await get_stats_for_period(date_from, date_to)
-        stats["period_from"] = date_from
-        stats["period_to"] = date_to
-        
-        top_products = await get_top_products(date_from, date_to)
+        stats["period_from"], stats["period_to"] = date_from, date_to
+        top_p = await get_top_products(date_from, date_to)
         
         await msg.delete()
-        
-        if stats['total_income'] == 0 and not top_products:
-            await message.answer(
-                f"⚠️ *Нет транзакций за указанный период {date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}*\n\n"
-                f"💡 Проверьте корректность дат и попробуйте снова.",
-                parse_mode="Markdown",
-                reply_markup=get_main_keyboard()
-            )
-        else:
-            await message.answer(format_simple_stats(stats, "СТАТИСТИКА ЗА ПЕРИОД", top_products), 
-                                parse_mode="Markdown", reply_markup=get_main_keyboard())
-        
+        await message.answer(format_simple_stats(stats, "СТАТИСТИКА ЗА ПЕРИОД", top_p), parse_mode="Markdown", reply_markup=get_main_keyboard())
     except ValueError:
-        await message.answer("❌ Ошибка формата даты!", parse_mode="Markdown")
-    
+        await message.answer("❌ Неверный формат!")
     await state.clear()
 
 @dp.message()
 async def unknown(message: types.Message):
-    if not message.text.startswith("/"):
-        await message.answer(
-            "❓ Пожалуйста, используйте кнопки встроенного меню\n\n"
-            "📊 *Как получить финансовый отчет:*\n"
-            "• «📈 Быстрый отчет» — выручка за текущий день\n"
-            "• «📊 Выбрать период» — расчет за произвольный диапазон\n\n"
-            "📅 *Шаблон ввода дат:* ГГГГ-ММ-ДД\n"
-            "Пример: `2026-06-01`",
-            parse_mode="Markdown",
-            reply_markup=get_main_keyboard()
-        )
+    await message.answer("❓ Пожалуйста, выберите действие в меню.", reply_markup=get_main_keyboard())
 
 async def main():
-    logger.info("🚀 LANGAME Аналитика бот запускается...")
     await bot.delete_webhook(drop_pending_updates=True)
-    if API_KEY:
-        logger.info("✅ API-токен успешно интегрирован")
-    logger.info("🎉 Бот готов принимать команды!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
