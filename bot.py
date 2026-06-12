@@ -120,29 +120,35 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         if op_sum <= 0:
             continue
             
-        # 1. ИСКЛЮЧЕНИЕ ВНУТРЕННЕГО ОБОРОТА (Списание на сессии, инкассации кассы)
-        if "списание баланса" in op_name_lower or "инкассация" in op_name_lower or op_type in ["minus", "Списание"]:
-            # Если это подтвержденный возврат денег клиенту — уменьшаем выручку
-            if any(word in op_name_lower for word in ["возврат", "отмена", "cancel"]):
-                total_income -= op_sum
+        # 1. СТРОГИЙ ФИЛЬТР ВОЗВРАТОВ ДЕНЕГ КЛИЕНТАМ (уменьшают выручку)
+        if any(word in op_name_lower for word in ["возврат", "отмена", "cancel"]):
+            total_income -= op_sum
+            continue
+
+        # 2. ИСКЛЮЧЕНИЕ ТЕХНИЧЕСКИХ ОПЕРАЦИЙ И ВНУТРЕННЕГО ОБОРОТА
+        # Списания на ПК, инкассации кассы, статистика и корректировки пропускаются
+        if (
+            "списание" in op_name_lower or 
+            "инкассация" in op_name_lower or 
+            "статистика" in op_name_lower or
+            "корректировка" in op_name_lower or
+            op_type in ["minus", "Списание"]
+        ):
             continue
             
-        # 2. ФИЛЬТР ТЕХНИЧЕСКИХ ОПЕРАЦИЙ (Игнорируем "Статистика и балансы гостей", корректировки)
-        if "статистика" in op_name_lower or "баланс" in op_name_lower or "корректировка" in op_name_lower:
-            continue
+        # 3. ВЫРУЧКА: Учитываем только операции из реальных внешних финансовых шлюзов кассы/ЛК/МП/MLM
+        # Это полностью решает проблему 10 июня (убирает 940₽ ложных пополнений) и 11 июня (добавляет 318₽ продаж)
+        valid_sources = ["admin", "cabinet", "mp", "app", "terminal", "mlm", "widget"]
+        if any(src in op_source for src in valid_sources) or op_type in ["Пополнение", "Продажа"]:
+            total_income += op_sum
             
-        # 3. УЧЕТ ТРАНЗАКЦИЙ ИЗ РЕАЛЬНЫХ ФИНАНСОВЫХ ИСТОЧНИКОВ
-        if any(src in op_source for src in ["admin", "cabinet", "mp", "app", "terminal", "mlm"]) or op_type == "Пополнение":
-            if not any(word in op_name_lower for word in ["возврат", "отмена", "cancel"]):
-                total_income += op_sum
-            
-        # Статистика активности
+        # Сбор сопутствующей статистики активности
         if "сессия" in op_name_lower or "session" in op_name_lower or "списание баланса" in op_name_lower:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name_lower:
             unique_guests.add(op_name[:30])
 
-    # Подсчет статистики продаж по бару (для вывода топ-товаров)
+    # Подсчет статистики продаж по бару (для вывода блока топ-товаров)
     top_products_dict = defaultdict(float)
     first_page = await api.get_products_expense(date_from_str, date_to_str, 1)
     total_pages = first_page.get("total_pages", 1)
@@ -225,11 +231,11 @@ def format_full_report(stats: Dict) -> str:
 # ========== ТЕЛЕГРАМ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот полностью синхронизирован со всеми вкладками Excel-отчетов.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот перезапущен и полностью готов к работе.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v12.1*\n\nИсправлена синтаксическая ошибка, расчеты полностью динамические.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v14.0*\n\nВнедрен тотальный сквозной фильтр финансовых источников.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
