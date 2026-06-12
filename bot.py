@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Dict, Any
 from collections import defaultdict
@@ -49,6 +50,14 @@ def safe_float(value: Any) -> float:
         return float(value) if value else 0
     except:
         return 0
+
+def extract_price_from_name(name: str) -> float:
+    """Пытаемся извлечь цену из названия товара (если есть)"""
+    # Ищем числа в названии, которые могут быть ценой
+    match = re.search(r'(\d+)\s*руб', name.lower())
+    if match:
+        return float(match.group(1))
+    return 0
 
 # ========== API КЛИЕНТ ==========
 class LangameAPI:
@@ -102,8 +111,10 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     total_income = 0
     sessions_count = 0
     unique_guests = set()
-    product_sales = defaultdict(float)
-    bar_revenue = 0
+    
+    # Структура для товаров: {название: {"count": количество, "total_sum": общая_сумма}}
+    product_stats = defaultdict(lambda: {"count": 0, "total_sum": 0, "last_price": 0})
+    
     club_name = "CyberX Краснодар Коммунаров"
     
     # Ключевые слова для определения товаров бара
@@ -112,17 +123,20 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         "сэндвич", "наггетс", "картошка", "фрай", "кока-кола", "липтон", "фанта",
         "энергетик", "смузи", "капучино", "латте", "американо", "флеш", "добрый",
         "берн", "хрустальная", "сникерс", "баунти", "твикс", "милка", "лейс",
-        "принглс", "китКат", "орео", "кальян", "пиво"
+        "принглс", "киткат", "орео", "кальян", "пиво", "чиабатта", "кацу",
+        "чебупели", "чебупицца", "ходстеры", "козёл", "хадыженское", "старый мельник",
+        "клубника", "шоколад", "карамель", "фундук", "манго", "киви", "апельсин",
+        "лимон", "лайм", "банан", "яблоко", "дыня", "персик", "вишня", "малина"
     ]
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = item.get("type", "")
         op_name = item.get("name", "").lower()
-        op_source = item.get("source", "")
+        original_name = item.get("name", "")
         club_name = item.get("club_name", club_name)
         
-        # Пополнения (выручка) - ВАЖНО: русское слово "Пополнение"
+        # Пополнения (выручка)
         if op_type == "Пополнение" and op_sum > 0:
             total_income += op_sum
         
@@ -132,25 +146,50 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         
         # Уникальные гости
         guest_name = item.get("name", "")
-        if guest_name and len(guest_name) > 3:
+        if guest_name and len(guest_name) > 3 and op_type != "Пополнение":
             unique_guests.add(guest_name[:30])
         
-        # Подсчет продаж бара (по ключевым словам)
-        if op_sum > 0 and len(op_name) > 3:
+        # Подсчет продаж бара
+        if op_type == "Списание" and op_sum > 0 and len(op_name) > 3:
+            is_product = False
             for keyword in food_keywords:
                 if keyword in op_name:
-                    product_sales[item.get("name", "Товар")] += op_sum
-                    bar_revenue += op_sum
+                    is_product = True
                     break
+            
+            if is_product:
+                # Используем оригинальное название как ключ (сохраняем вкусы)
+                product_name = original_name.strip()
+                if product_name:
+                    product_stats[product_name]["count"] += 1
+                    product_stats[product_name]["total_sum"] += op_sum
+                    product_stats[product_name]["last_price"] = op_sum
+                    logger.debug(f"Товар: {product_name} - {op_sum} ₽ (всего: {product_stats[product_name]['count']} шт.)")
     
-    # Топ товаров
-    top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:10]
+    # Формируем топ товаров по общей выручке
+    top_products = []
+    for name, stats in product_stats.items():
+        top_products.append({
+            "name": name,
+            "count": stats["count"],
+            "total_sum": stats["total_sum"],
+            "avg_price": stats["total_sum"] / stats["count"] if stats["count"] > 0 else 0
+        })
+    
+    # Сортируем по общей выручке
+    top_products.sort(key=lambda x: x["total_sum"], reverse=True)
+    top_products = top_products[:15]
+    
+    bar_revenue = sum(p["total_sum"] for p in top_products)
     
     days_count = max((date_to - date_from).days + 1, 1)
     avg_check = total_income / sessions_count if sessions_count > 0 else 0
     avg_daily = total_income / days_count if days_count > 0 else 0
     
-    logger.info(f"ИТОГО: выручка={total_income}, продажи={bar_revenue}, сессии={sessions_count}, товаров={len(top_products)}")
+    logger.info(f"ИТОГО: выручка={total_income}, продажи={bar_revenue}, сессии={sessions_count}")
+    logger.info(f"Найдено товаров: {len(product_stats)}")
+    for p in top_products[:5]:
+        logger.info(f"  {p['name']}: {p['count']} шт. x {p['avg_price']:.0f} ₽ = {p['total_sum']:.0f} ₽")
     
     return {
         "period_from": date_from,
@@ -205,12 +244,8 @@ def format_stats_message(stats: Dict, title: str) -> str:
 
 🏆 *Топ тарифов:*\n"""
     
-    if stats['top_products']:
-        for name, amount in stats['top_products'][:3]:
-            short_name = name[:25] + "..." if len(name) > 25 else name
-            result += f"• {short_name} ({amount:,.0f} ₽)\n"
-    else:
-        result += "• Нет данных\n"
+    # Топ тарифов - пока нет данных
+    result += "• Нет данных\n"
     
     result += f"""
 🔄 *Смены и возвраты:*
@@ -220,9 +255,10 @@ def format_stats_message(stats: Dict, title: str) -> str:
 🍔 *Топ товаров бара:*\n"""
     
     if stats['top_products']:
-        for name, amount in stats['top_products'][:5]:
-            short_name = name[:25] + "..." if len(name) > 25 else name
-            result += f"• {short_name} ({amount:,.0f} ₽)\n"
+        for i, product in enumerate(stats['top_products'][:5], 1):
+            name = product['name'][:35] + "..." if len(product['name']) > 35 else product['name']
+            result += f"{i}. *{name}*\n"
+            result += f"   📦 {product['count']} шт. × {product['avg_price']:,.0f} ₽ = {product['total_sum']:,.0f} ₽\n\n"
     else:
         result += "• Нет данных\n"
     
@@ -260,9 +296,10 @@ def format_simple_stats(stats: Dict, title: str) -> str:
 🍔 *Топ товаров:*\n"""
     
     if stats['top_products']:
-        for name, amount in stats['top_products'][:8]:
-            short_name = name[:30] + "..." if len(name) > 30 else name
-            result += f"• {short_name} — {amount:,.0f} ₽\n"
+        for i, product in enumerate(stats['top_products'][:8], 1):
+            name = product['name'][:30] + "..." if len(product['name']) > 30 else product['name']
+            result += f"{i}. {name}\n"
+            result += f"   📦 {product['count']} шт. × {product['avg_price']:,.0f} ₽ = {product['total_sum']:,.0f} ₽\n"
     else:
         result += "• Нет данных\n"
     
@@ -293,7 +330,7 @@ async def about(message: types.Message):
         "Бот для аналитики игрового клуба\n\n"
         "📊 *Что умеет:*\n"
         "• Анализ выручки за любой период\n"
-        "• Топ товаров\n"
+        "• Топ товаров (с подсчетом количества продаж)\n"
         "• Статистика сессий\n\n"
         "📅 *Формат даты:* ГГГГ-ММ-ДД",
         parse_mode="Markdown",
