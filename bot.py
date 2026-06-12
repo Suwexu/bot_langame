@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -62,6 +62,39 @@ class ProductsExpenseState(StatesGroup):
     waiting_for_date_from = State()
     waiting_for_date_to = State()
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def safe_float(value: Any, default: float = 0) -> float:
+    """Безопасное преобразование в float"""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+def safe_int(value: Any, default: int = 0) -> int:
+    """Безопасное преобразование в int"""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+def format_currency(amount: Any) -> str:
+    """Форматирование валюты"""
+    try:
+        return f"{safe_float(amount):,.2f} ₽"
+    except:
+        return f"{amount} ₽"
+
+def format_bonus(amount: Any) -> str:
+    """Форматирование бонусов"""
+    try:
+        return f"{safe_float(amount):,.0f}"
+    except:
+        return f"{amount}"
+
 # ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
@@ -115,11 +148,9 @@ class LangameAPI:
             return {"success": True, "working_endpoint": "/all_operations_log/list"}
         return {"success": False, "error": result.get("error", "Неизвестная ошибка")}
     
-    # ========== КЛУБЫ ==========
     async def get_clubs(self) -> Dict:
         return await self.request("/clubs/list")
     
-    # ========== ГОСТИ ==========
     async def get_guests_list(self, page: int = 1, limit: int = 20, guest_id: int = None) -> Dict:
         params = {"page": page, "page_limit": limit}
         if guest_id:
@@ -154,7 +185,6 @@ class LangameAPI:
     async def get_bonus_balance(self, page: int = 1, limit: int = 20) -> Dict:
         return await self.request("/guests/bonus_balance", params={"page": page, "page_limit": limit})
     
-    # ========== ТРАНЗАКЦИИ И БАЛАНСЫ ==========
     async def get_transactions(self, date_from: str = None, date_to: str = None, page: int = 1, limit: int = 20) -> Dict:
         params = {"page": page, "page_limit": limit}
         if date_from:
@@ -183,14 +213,12 @@ class LangameAPI:
     async def get_balances_list(self, date_from: str, date_to: str, page: int = 1, limit: int = 20) -> Dict:
         return await self.request("/balances/list", params={"page": page, "page_limit": limit, "date_from": date_from, "date_to": date_to})
     
-    # ========== КОМПЬЮТЕРЫ ==========
     async def get_pc_list(self) -> Dict:
         return await self.request("/global/linking_pc_by_type/list")
     
     async def get_pc_types(self) -> Dict:
         return await self.request("/global/types_of_pc_in_clubs/list")
     
-    # ========== ТОВАРЫ ==========
     async def get_products_list(self) -> Dict:
         return await self.request("/products/list")
     
@@ -210,7 +238,6 @@ class LangameAPI:
             params["type"] = type_filter
         return await self.request("/products/expense", params=params)
     
-    # ========== ТАРИФЫ ==========
     async def get_tariffs(self) -> Dict:
         return await self.request("/tariffs/time_period/list")
     
@@ -223,11 +250,9 @@ class LangameAPI:
     async def get_tariff_by_days(self) -> Dict:
         return await self.request("/tariffs/by_days/list")
     
-    # ========== АДМИНИСТРАТОРЫ ==========
     async def get_users_list(self) -> Dict:
         return await self.request("/users/list")
     
-    # ========== КОНФИГУРАЦИЯ ==========
     async def get_config(self) -> Dict:
         return await self.request("/config/list")
     
@@ -272,7 +297,7 @@ def get_search_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📝 По ФИО", callback_data="search_name")]
     ])
 
-# ========== ФОРМАТТЕРЫ ==========
+# ========== ФОРМАТТЕРЫ (с защитой от ошибок) ==========
 def format_clubs(data: Dict) -> str:
     if not data.get("status"):
         return f"❌ Ошибка: {data.get('error', 'Неизвестная ошибка')}"
@@ -300,7 +325,10 @@ def format_guests_list(data: Dict) -> str:
         result += f"🆔 ID: {guest.get('guest_id')}\n"
         result += f"📝 ФИО: {guest.get('fio', 'Не указано')}\n"
         result += f"📱 Телефон: {guest.get('phone', 'Не указан')}\n"
-        result += f"📅 Регистрация: {guest.get('date_insert', 'N/A')[:16] if guest.get('date_insert') else 'N/A'}\n"
+        date_insert = guest.get('date_insert', 'N/A')
+        if date_insert and date_insert != 'N/A':
+            date_insert = date_insert[:16]
+        result += f"📅 Регистрация: {date_insert}\n"
         result += "─" * 25 + "\n"
     if len(items) > 15:
         result += f"\n📊 Показано 15 из {len(items)} записей"
@@ -334,8 +362,14 @@ def format_guest_sessions(data: Dict, guest_id: int = None) -> str:
     result = f"🎮 СЕССИИ ГОСТЯ #{guest_id}\n\n" if guest_id else "🎮 СЕССИИ\n\n"
     for session in items[:10]:
         result += f"🆔 ID сессии: {session.get('id')}\n"
-        result += f"📅 Начало: {session.get('date_start', 'N/A')[:16] if session.get('date_start') else 'N/A'}\n"
-        result += f"⏱️ Окончание: {session.get('date_stop', 'Активна')[:16] if session.get('date_stop') else 'Активна'}\n"
+        date_start = session.get('date_start', 'N/A')
+        if date_start and date_start != 'N/A':
+            date_start = date_start[:16]
+        result += f"📅 Начало: {date_start}\n"
+        date_stop = session.get('date_stop', 'Активна')
+        if date_stop and date_stop != 'Активна':
+            date_stop = date_stop[:16]
+        result += f"⏱️ Окончание: {date_stop}\n"
         result += f"📊 Статус: {'✅ Завершена' if session.get('normal_stop') else '🟢 Активна'}\n"
         result += "─" * 25 + "\n"
     return result
@@ -347,14 +381,14 @@ def format_balances(data: Dict, title: str = "БАЛАНСЫ", currency: str = "
     if not items:
         return f"📭 {title} не найдены"
     result = f"💰 {title}\n\n"
-    total = 0
+    total = 0.0
     for item in items[:20]:
         if "bonus_balance" in item:
-            balance = float(item.get('bonus_balance', 0))
+            balance = safe_float(item.get('bonus_balance', 0))
             total += balance
             result += f"• Гость #{item.get('guest_id')}: {balance:,.0f} {currency}\n"
         else:
-            balance = float(item.get('balance', 0))
+            balance = safe_float(item.get('balance', 0))
             total += balance
             result += f"• Гость #{item.get('guest_id')}: {balance:,.2f} {currency}\n"
     result += f"\n💰 Общая сумма: {total:,.2f} {currency}"
@@ -367,10 +401,12 @@ def format_transactions(data: Dict) -> str:
     if not items:
         return "📭 Транзакции не найдены"
     result = "💸 ТРАНЗАКЦИИ\n\n"
-    total = 0
+    total = 0.0
     for item in items[:15]:
-        date = item.get('date_update', 'N/A')[:16] if item.get('date_update') else 'N/A'
-        amount = float(item.get('balance', 0))
+        date = item.get('date_update', 'N/A')
+        if date and date != 'N/A':
+            date = date[:16]
+        amount = safe_float(item.get('balance', 0))
         if amount > 0:
             total += amount
         result += f"📅 {date}\n💰 {'+' if amount > 0 else ''}{amount:,.2f} ₽\n"
@@ -387,11 +423,13 @@ def format_operations_log(data: Dict) -> str:
     if not items:
         return "📭 Операции не найдены"
     result = "📋 ЛОГ ОПЕРАЦИЙ\n\n"
-    total_income, total_expense = 0, 0
+    total_income, total_expense = 0.0, 0.0
     for item in items[:20]:
-        date = item.get('date_normal', 'N/A')[:16] if item.get('date_normal') else 'N/A'
+        date = item.get('date_normal', 'N/A')
+        if date and date != 'N/A':
+            date = date[:16]
         op_type = item.get('type', 'Unknown')
-        op_sum = item.get('sum', 0)
+        op_sum = safe_float(item.get('sum', 0))
         if op_sum > 0:
             if op_type == "Пополнение":
                 total_income += op_sum
@@ -418,7 +456,8 @@ def format_pc_list(data: Dict) -> str:
         result += f"{'🎮' if pc.get('isPS') else '🖥️'} {pc.get('name', 'Без имени')}\n"
         if pc.get('fiscal_name'):
             result += f"   📍 {pc.get('fiscal_name')}\n"
-        result += f"   🆔 UUID: {pc.get('UUID', 'N/A')[:16]}...\n"
+        uuid_val = pc.get('UUID', 'N/A')
+        result += f"   🆔 UUID: {uuid_val[:16] if len(uuid_val) > 16 else uuid_val}...\n"
         result += "─" * 25 + "\n"
     return result
 
@@ -445,9 +484,11 @@ def format_tariffs(data: Dict) -> str:
     result = "💲 ТАРИФЫ\n\n"
     for tariff in items[:15]:
         result += f"🆔 ID: {tariff.get('id')}\n"
-        result += f"💰 Цена: {tariff.get('price', 0):.2f} ₽\n"
-        if tariff.get('time_from') and tariff.get('time_to'):
-            result += f"⏰ Время: {tariff.get('time_from')[:5]} - {tariff.get('time_to')[:5]}\n"
+        result += f"💰 Цена: {safe_float(tariff.get('price', 0)):,.2f} ₽\n"
+        time_from = tariff.get('time_from', '')
+        time_to = tariff.get('time_to', '')
+        if time_from and time_to:
+            result += f"⏰ Время: {time_from[:5]} - {time_to[:5]}\n"
         result += "─" * 25 + "\n"
     return result
 
@@ -460,12 +501,18 @@ def format_working_shifts(data: Dict) -> str:
     result = "📊 СПИСОК СМЕН\n\n"
     for shift in items[:10]:
         result += f"🆔 Смена #{shift.get('id')}\n"
-        result += f"📅 Открыта: {shift.get('date_start', 'N/A')[:16] if shift.get('date_start') else 'N/A'}\n"
-        if shift.get('date_stop'):
-            result += f"📅 Закрыта: {shift.get('date_stop')[:16]}\n"
-        result += f"💰 Наличные: {shift.get('nal', 0):,.2f} ₽\n"
-        result += f"💳 Безналичные: {shift.get('beznal', 0):,.2f} ₽\n"
-        result += f"📈 Средний чек: {shift.get('middle_check', 0)} ₽\n"
+        date_start = shift.get('date_start', 'N/A')
+        if date_start and date_start != 'N/A':
+            date_start = date_start[:16]
+        result += f"📅 Открыта: {date_start}\n"
+        date_stop = shift.get('date_stop')
+        if date_stop:
+            result += f"📅 Закрыта: {date_stop[:16]}\n"
+        else:
+            result += f"🟢 Статус: Активна\n"
+        result += f"💰 Наличные: {safe_float(shift.get('nal', 0)):,.2f} ₽\n"
+        result += f"💳 Безналичные: {safe_float(shift.get('beznal', 0)):,.2f} ₽\n"
+        result += f"📈 Средний чек: {shift.get('middle_check', 0)}\n"
         result += "─" * 25 + "\n"
     return result
 
@@ -495,13 +542,15 @@ async def test_api(message: types.Message):
     msg = await message.answer("🔄 Проверка...")
     result = await api.test_connection()
     await msg.delete()
-    await message.answer("✅ API ПОДКЛЮЧЕНИЕ УСПЕШНО!\n\n📊 Статус: Работает\n🔑 API Key: Настроен\n🌐 URL: https://cyberx302.langame.ru/public_api" if result.get("success") else f"❌ Ошибка: {result.get('error')}")
+    if result.get("success"):
+        await message.answer("✅ API ПОДКЛЮЧЕНИЕ УСПЕШНО!\n\n📊 Статус: Работает\n🔑 API Key: Настроен\n🌐 URL: https://cyberx302.langame.ru/public_api", reply_markup=get_main_keyboard())
+    else:
+        await message.answer(f"❌ Ошибка: {result.get('error')}", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about_bot(message: types.Message):
-    await message.answer("🤖 LANGAME БОТ v3.0\n📍 Все команды из API LANGAME\n⏱️ Таймаут: 90 секунд")
+    await message.answer("🤖 LANGAME БОТ v3.0\n📍 Все команды из API LANGAME\n⏱️ Таймаут: 90 секунд", reply_markup=get_main_keyboard())
 
-# ========== КЛУБЫ ==========
 @dp.message(F.text == "🏢 Клубы")
 async def show_clubs(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -510,7 +559,6 @@ async def show_clubs(message: types.Message):
     await msg.delete()
     await message.answer(format_clubs(response), reply_markup=get_main_keyboard())
 
-# ========== ГОСТИ ==========
 @dp.message(F.text == "👤 Список гостей")
 async def show_guests_list(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -547,7 +595,11 @@ async def perform_search(message: types.Message, state: FSMContext):
     query = message.text.strip()
     msg = await message.answer("🔍 Поиск...")
     
-    search_payload = {"pagination": {"page": 1, "size": 10}, "featues": {"fields": ["guest_id", "fio", "phone"], "balance": True, "bonus_balance": True}}
+    search_payload = {
+        "pagination": {"page": 1, "size": 10},
+        "featues": {"fields": ["guest_id", "fio", "phone"], "balance": True, "bonus_balance": True}
+    }
+    
     if search_type == "phone":
         search_payload["filter"] = {"phone": query}
     elif search_type == "id" and query.isdigit():
@@ -566,11 +618,18 @@ async def perform_search(message: types.Message, state: FSMContext):
     if response.get("items"):
         result = "👤 РЕЗУЛЬТАТЫ ПОИСКА\n\n"
         for guest in response["items"][:5]:
-            result += f"🆔 ID: {guest.get('guest_id')}\n📝 ФИО: {guest.get('fio', 'Не указано')}\n📱 Телефон: {guest.get('phone', 'Не указан')}\n"
+            result += f"🆔 ID: {guest.get('guest_id')}\n"
+            result += f"📝 ФИО: {guest.get('fio', 'Не указано')}\n"
+            result += f"📱 Телефон: {guest.get('phone', 'Не указан')}\n"
+            
             if guest.get("balance"):
-                result += f"💰 Баланс: {guest['balance'].get('amount', 0):,.2f} ₽\n"
+                balance_amount = guest['balance'].get('amount', 0)
+                result += f"💰 Баланс: {format_currency(balance_amount)}\n"
+            
             if guest.get("bonus_balance"):
-                result += f"🎁 Бонусы: {guest['bonus_balance'].get('amount', 0)}\n"
+                bonus_amount = guest['bonus_balance'].get('amount', 0)
+                result += f"🎁 Бонусы: {format_bonus(bonus_amount)}\n"
+            
             result += "─" * 25 + "\n"
         await message.answer(result, reply_markup=get_main_keyboard())
     else:
@@ -593,7 +652,6 @@ async def show_sessions(message: types.Message, state: FSMContext):
     await message.answer(format_guest_sessions(response, int(message.text)), reply_markup=get_main_keyboard())
     await state.clear()
 
-# ========== БАЛАНСЫ ==========
 @dp.message(F.text == "💰 Балансы")
 async def show_balances(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -610,7 +668,6 @@ async def show_bonus(message: types.Message):
     await msg.delete()
     await message.answer(format_balances(response, "БОНУСНЫЕ БАЛАНСЫ", "бонусов"), reply_markup=get_main_keyboard())
 
-# ========== ТРАНЗАКЦИИ ==========
 @dp.message(F.text == "💸 Транзакции")
 async def show_transactions(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -631,7 +688,6 @@ async def show_operations(message: types.Message):
     await msg.delete()
     await message.answer(format_operations_log(response), reply_markup=get_main_keyboard())
 
-# ========== КАССА ==========
 @dp.message(F.text == "💳 Кассовые операции")
 async def cash_transactions_prompt(message: types.Message):
     await message.answer("💳 Введите ID клуба:")
@@ -662,7 +718,7 @@ async def cash_transactions_result(message: types.Message, state: FSMContext):
         result = "💳 КАССОВЫЕ ОПЕРАЦИИ\n\n"
         for item in response["data"][:15]:
             result += f"📅 {item.get('date', 'N/A')}\n"
-            result += f"💰 Сумма: {item.get('sum', 0)} ₽\n"
+            result += f"💰 Сумма: {safe_float(item.get('sum', 0)):,.2f} ₽\n"
             if item.get('comment'):
                 result += f"📝 {item.get('comment')}\n"
             result += "─" * 25 + "\n"
@@ -671,7 +727,6 @@ async def cash_transactions_result(message: types.Message, state: FSMContext):
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
     await state.clear()
 
-# ========== СМЕНЫ ==========
 @dp.message(F.text == "📊 Смены")
 async def show_shifts(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -680,7 +735,6 @@ async def show_shifts(message: types.Message):
     await msg.delete()
     await message.answer(format_working_shifts(response), reply_markup=get_main_keyboard())
 
-# ========== ПОПОЛНЕНИЯ ==========
 @dp.message(F.text == "💰 Пополнения")
 async def balances_history_prompt(message: types.Message):
     await message.answer("📅 Введите дату ОТ (ГГГГ-ММ-ДД):")
@@ -703,14 +757,13 @@ async def balances_history_result(message: types.Message, state: FSMContext):
         for item in response["data"][:15]:
             result += f"📅 {item.get('date', 'N/A')}\n"
             result += f"👤 Гость: {item.get('guest_name', 'N/A')}\n"
-            result += f"💰 Сумма: {item.get('amount', 0)} ₽\n"
+            result += f"💰 Сумма: {format_currency(item.get('amount', 0))}\n"
             result += "─" * 25 + "\n"
         await message.answer(result, reply_markup=get_main_keyboard())
     else:
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
     await state.clear()
 
-# ========== КОМПЬЮТЕРЫ ==========
 @dp.message(F.text == "🖥️ Компьютеры")
 async def show_pc(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -736,7 +789,6 @@ async def show_pc_types(message: types.Message):
     else:
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
 
-# ========== ТОВАРЫ ==========
 @dp.message(F.text == "🍔 Товары")
 async def show_products(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -761,7 +813,7 @@ async def goods_result(message: types.Message, state: FSMContext):
     if response.get("status") and response.get("data"):
         result = f"📦 ОСТАТКИ (клуб #{message.text})\n\n"
         for item in response["data"][:20]:
-            result += f"🆔 ID: {item.get('id')}\n📝 {item.get('name', 'Без названия')}\n📦 Кол-во: {item.get('count', 0)} шт.\n"
+            result += f"🆔 ID: {item.get('id')}\n📝 {item.get('name', 'Без названия')}\n📦 Кол-во: {safe_int(item.get('count', 0))} шт.\n"
             result += "─" * 25 + "\n"
         await message.answer(result, reply_markup=get_main_keyboard())
     else:
@@ -777,11 +829,14 @@ async def show_arrival(message: types.Message):
     if response.get("status") and response.get("data"):
         result = "📥 ПОСТУПЛЕНИЯ ТОВАРОВ\n\n"
         for item in response["data"][:15]:
-            result += f"📅 {item.get('date_fact', 'N/A')[:16] if item.get('date_fact') else 'N/A'}\n"
+            date_fact = item.get('date_fact', 'N/A')
+            if date_fact and date_fact != 'N/A':
+                date_fact = date_fact[:16]
+            result += f"📅 {date_fact}\n"
             result += f"🆔 Товар ID: {item.get('list_goods_id')}\n"
-            result += f"📦 Кол-во: {item.get('count', 0)} шт.\n"
+            result += f"📦 Кол-во: {safe_int(item.get('count', 0))} шт.\n"
             if item.get('price_fact'):
-                result += f"💰 Цена: {item.get('price_fact')} ₽\n"
+                result += f"💰 Цена: {format_currency(item.get('price_fact'))}\n"
             result += "─" * 25 + "\n"
         await message.answer(result, reply_markup=get_main_keyboard())
     else:
@@ -809,15 +864,19 @@ async def products_expense_result(message: types.Message, state: FSMContext):
     await msg.delete()
     if response.get("status") and response.get("data"):
         result = "📤 ПРОДАЖИ ТОВАРОВ\n\n"
-        total = 0
+        total = 0.0
         for item in response["data"][:15]:
-            result += f"📅 {item.get('date', 'N/A')[:16] if item.get('date') else 'N/A'}\n"
+            date_val = item.get('date', 'N/A')
+            if date_val and date_val != 'N/A':
+                date_val = date_val[:16]
+            result += f"📅 {date_val}\n"
             result += f"🆔 Товар ID: {item.get('list_goods_id')}\n"
-            result += f"📦 Кол-во: {item.get('count', 0)} шт.\n"
-            if item.get('price_sale'):
-                sale_sum = item.get('price_sale') * item.get('count', 0)
-                total += sale_sum
-                result += f"💰 Сумма: {sale_sum:,.2f} ₽\n"
+            result += f"📦 Кол-во: {safe_int(item.get('count', 0))} шт.\n"
+            price_sale = safe_float(item.get('price_sale', 0))
+            count = safe_int(item.get('count', 0))
+            sale_sum = price_sale * count
+            total += sale_sum
+            result += f"💰 Сумма: {sale_sum:,.2f} ₽\n"
             result += "─" * 25 + "\n"
         result += f"\n💰 Общая выручка: {total:,.2f} ₽"
         await message.answer(result, reply_markup=get_main_keyboard())
@@ -825,7 +884,6 @@ async def products_expense_result(message: types.Message, state: FSMContext):
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
     await state.clear()
 
-# ========== ТАРИФЫ ==========
 @dp.message(F.text == "💲 Тарифы")
 async def show_tariffs(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -873,7 +931,6 @@ async def show_tariff_types(message: types.Message):
     else:
         await message.answer(f"❌ {response.get('error', 'Нет данных')}", reply_markup=get_main_keyboard())
 
-# ========== АДМИНИСТРАТОРЫ ==========
 @dp.message(F.text == "👨‍💼 Администраторы")
 async def show_users(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
@@ -882,7 +939,6 @@ async def show_users(message: types.Message):
     await msg.delete()
     await message.answer(format_users_list(response), reply_markup=get_main_keyboard())
 
-# ========== КОНФИГУРАЦИЯ ==========
 @dp.message(F.text == "⚙️ Конфигурация")
 async def show_config(message: types.Message):
     if not API_KEY: return await message.answer("❌ API ключ не настроен!")
