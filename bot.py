@@ -61,6 +61,11 @@ class HistoryState(StatesGroup):
 class PcUuidsState(StatesGroup):
     waiting_uuids = State()
 
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def is_admin(user_id: int) -> bool:
     if not ALLOWED_USERS:
@@ -92,7 +97,6 @@ class LangameAPI:
         except Exception as e:
             return {"status": False, "error": str(e)}
     
-    # ========== ОСНОВНЫЕ МЕТОДЫ ==========
     async def test_api(self) -> Dict:
         return await self._request("/all_operations_log/list", params={"date_from": "2024-01-01", "date_to": "2024-01-02"})
     
@@ -197,7 +201,6 @@ class LangameAPI:
     async def get_terminal(self) -> Dict:
         return await self._request("/ver/get_terminal")
     
-    # ========== УПРАВЛЕНИЕ ==========
     async def update_balance(self, phone: str, amount: float, comment: str = None) -> Dict:
         data = {"phone": phone, "type": "balance", "sum": amount}
         if comment:
@@ -212,7 +215,7 @@ class LangameAPI:
 
 api = LangameAPI(API_KEY if API_KEY else "")
 
-# ========== КЛАВИАТУРА ==========
+# ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(text="🔌 Проверить API"), KeyboardButton(text="ℹ️ О боте")],
@@ -263,13 +266,7 @@ def format_result(data: Dict, title: str, fields: list) -> str:
     for item in items[:15]:
         for field in fields:
             value = item.get(field, "—")
-            if field == "balance" and isinstance(value, (int, float)):
-                result += f"💰 {field}: {value:,.2f} ₽\n"
-            elif field == "bonus_balance" and isinstance(value, (int, float)):
-                result += f"🎁 {field}: {value:,.0f}\n"
-            elif field == "sum" and isinstance(value, (int, float)):
-                result += f"💰 {field}: {value:,.2f} ₽\n"
-            elif field == "amount" and isinstance(value, (int, float)):
+            if field in ["balance", "bonus_balance", "sum", "amount"] and isinstance(value, (int, float)):
                 result += f"💰 {field}: {value:,.2f} ₽\n"
             else:
                 result += f"📌 {field}: {safe_str(value)}\n"
@@ -346,6 +343,9 @@ async def start(message: types.Message):
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
+    if not API_KEY:
+        await message.answer("❌ API ключ не настроен!")
+        return
     msg = await message.answer("🔄 Проверка...")
     result = await api.test_api()
     await msg.delete()
