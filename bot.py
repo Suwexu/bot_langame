@@ -25,7 +25,6 @@ API_BASE_URL = "https://cyberx302.langame.ru"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # Список разрешенных пользователей (ID Telegram)
-# Добавьте сюда ID пользователей, которые могут выполнять опасные операции
 ALLOWED_USERS = [int(x) for x in os.getenv("ALLOWED_USERS", "").split(",") if x] if os.getenv("ALLOWED_USERS") else []
 
 logging.basicConfig(
@@ -67,7 +66,7 @@ class ProductsExpenseState(StatesGroup):
     waiting_for_date_to = State()
 
 class BalanceTopupState(StatesGroup):
-    waiting_for_guest_id = State()
+    waiting_for_phone = State()
     waiting_for_amount = State()
     waiting_for_comment = State()
 
@@ -76,7 +75,6 @@ class PcManageState(StatesGroup):
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def safe_float(value: Any, default: float = 0) -> float:
-    """Безопасное преобразование в float"""
     if value is None:
         return default
     try:
@@ -85,7 +83,6 @@ def safe_float(value: Any, default: float = 0) -> float:
         return default
 
 def safe_int(value: Any, default: int = 0) -> int:
-    """Безопасное преобразование в int"""
     if value is None:
         return default
     try:
@@ -94,23 +91,20 @@ def safe_int(value: Any, default: int = 0) -> int:
         return default
 
 def format_currency(amount: Any) -> str:
-    """Форматирование валюты"""
     try:
         return f"{safe_float(amount):,.2f} ₽"
     except:
         return f"{amount} ₽"
 
 def format_bonus(amount: Any) -> str:
-    """Форматирование бонусов"""
     try:
         return f"{safe_float(amount):,.0f}"
     except:
         return f"{amount}"
 
 def is_admin(user_id: int) -> bool:
-    """Проверка, имеет ли пользователь права администратора"""
     if not ALLOWED_USERS:
-        return True  # Если список пуст - разрешаем всем
+        return True
     return user_id in ALLOWED_USERS
 
 # ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
@@ -139,7 +133,7 @@ class LangameAPI:
                     async with session.get(url, headers=self.headers, params=params, timeout=timeout) as resp:
                         return await self._handle_response(resp)
                 else:
-                    async with session.post(url, headers=self.headers, json=data, timeout=timeout) as resp:
+                    async with session.post(url, headers=self.headers, json=data, params=params, timeout=timeout) as resp:
                         return await self._handle_response(resp)
             except asyncio.TimeoutError:
                 return {"status": False, "error": f"Сервер не ответил за {timeout} секунд"}
@@ -183,6 +177,15 @@ class LangameAPI:
     async def get_guest_by_id(self, guest_id: int) -> Dict:
         return await self.request(f"/guests/{guest_id}")
     
+    async def get_guest_by_phone(self, phone: str) -> Dict:
+        """Поиск гостя по номеру телефона"""
+        search_data = {
+            "filter": {"phone": phone},
+            "pagination": {"page": 1, "size": 1},
+            "featues": {"fields": ["guest_id", "fio", "phone", "balance"]}
+        }
+        return await self.request("/guests/search", method="POST", data=search_data)
+    
     async def get_guest_groups(self) -> Dict:
         return await self.request("/guests/groups")
     
@@ -206,30 +209,30 @@ class LangameAPI:
         return await self.request("/guests/bonus_balance", params={"page": page, "page_limit": limit})
     
     # ========== УПРАВЛЕНИЕ БАЛАНСОМ ГОСТЯ ==========
-    async def update_guest_balance(self, guest_id: int, amount: float, operation_type: str = "balance", 
-                                    comment: str = None, balance_type: str = None) -> Dict:
-        """
-        Пополнение/списание баланса гостя
-        operation_type: "balance" - деньги, "bonus_balance" - бонусы
-        """
+    async def update_guest_balance_by_phone(self, phone: str, amount: float, comment: str = None) -> Dict:
+        """Пополнение/списание баланса гостя по номеру телефона"""
         data = {
-            "type": operation_type,
-            "sum": amount
+            "type": "balance",
+            "sum": float(amount)
         }
         if comment:
             data["comment"] = comment
-        if balance_type:
-            data["balance_type"] = balance_type
         
-        return await self.request(f"/guests/{guest_id}/balance", method="POST", data=data)
+        params = {"phone": phone}
+        
+        # Пробуем POST с данными в body
+        result = await self.request("/guest/balance", method="POST", data=data, params=params)
+        
+        if result.get("status"):
+            return result
+        
+        # Если POST не сработал, пробуем GET с параметрами
+        result = await self.request("/guest/balance", method="GET", params={"phone": phone, "sum": amount})
+        
+        return result
     
     # ========== УПРАВЛЕНИЕ КОМПЬЮТЕРАМИ ==========
     async def manage_pc(self, command: str, club_id: int = None, uuids: list = None, pc_type: str = "free") -> Dict:
-        """
-        Управление компьютерами
-        command: "tech_start", "tech_stop", "lock", "unlock", "reboot", "power_on", "power_off"
-        pc_type: "all" - все ПК, "free" - только свободные
-        """
         data = {
             "command": command,
             "type": pc_type
@@ -362,15 +365,6 @@ def get_search_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📱 По телефону", callback_data="search_phone")],
         [InlineKeyboardButton(text="🆔 По ID", callback_data="search_id")],
         [InlineKeyboardButton(text="📝 По ФИО", callback_data="search_name")]
-    ])
-
-def get_pc_manage_keyboard(command: str, title: str) -> InlineKeyboardMarkup:
-    """Клавиатура для управления ПК"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🖥️ Все свободные ПК", callback_data=f"pc_{command}_free")],
-        [InlineKeyboardButton(text="🎮 Все ПК (включая занятые)", callback_data=f"pc_{command}_all")],
-        [InlineKeyboardButton(text="📋 Выбрать по UUID", callback_data=f"pc_{command}_uuids")],
-        [InlineKeyboardButton(text="◀️ Отмена", callback_data="pc_cancel")]
     ])
 
 # ========== ФОРМАТТЕРЫ ==========
@@ -1117,8 +1111,8 @@ async def topup_balance_prompt(message: types.Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ У вас нет прав для выполнения этой операции!")
         return
-    await message.answer("💳 Введите ID гостя для пополнения баланса:")
-    await BalanceTopupState.waiting_for_guest_id.set()
+    await message.answer("📱 Введите номер телефона гостя (например: 9001234567):")
+    await BalanceTopupState.waiting_for_phone.set()
     await BalanceTopupState.update_data(operation="topup")
 
 @dp.message(F.text == "💸 Списать баланс")
@@ -1129,17 +1123,33 @@ async def withdraw_balance_prompt(message: types.Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ У вас нет прав для выполнения этой операции!")
         return
-    await message.answer("💳 Введите ID гостя для списания баланса:")
-    await BalanceTopupState.waiting_for_guest_id.set()
+    await message.answer("📱 Введите номер телефона гостя (например: 9001234567):")
+    await BalanceTopupState.waiting_for_phone.set()
     await BalanceTopupState.update_data(operation="withdraw")
 
-@dp.message(StateFilter(BalanceTopupState.waiting_for_guest_id))
+@dp.message(StateFilter(BalanceTopupState.waiting_for_phone))
 async def balance_amount_prompt(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("❌ Введите числовой ID гостя!")
+    phone = message.text.strip()
+    phone = ''.join(filter(str.isdigit, phone))
+    if len(phone) < 10:
+        await message.answer("❌ Введите корректный номер телефона (10-11 цифр)!")
         return
-    await state.update_data(guest_id=int(message.text))
-    await message.answer("💰 Введите сумму (положительное число):")
+    
+    msg = await message.answer(f"🔍 Проверка гостя с номером {phone}...")
+    search_result = await api.get_guest_by_phone(phone)
+    await msg.delete()
+    
+    if not search_result.get("items"):
+        await message.answer(f"❌ Гость с номером {phone} не найден!")
+        await state.clear()
+        return
+    
+    guest = search_result["items"][0]
+    guest_name = guest.get('fio', 'Не указано')
+    guest_id = guest.get('guest_id')
+    
+    await state.update_data(phone=phone, guest_id=guest_id, guest_name=guest_name)
+    await message.answer(f"👤 Найден гость: {guest_name} (ID: {guest_id})\n\n💰 Введите сумму (положительное число):")
     await state.set_state(BalanceTopupState.waiting_for_amount)
 
 @dp.message(StateFilter(BalanceTopupState.waiting_for_amount))
@@ -1158,7 +1168,7 @@ async def balance_comment_prompt(message: types.Message, state: FSMContext):
     final_amount = amount if operation == "topup" else -amount
     
     await state.update_data(amount=final_amount)
-    await message.answer("📝 Введите комментарий к операции (или 'нет' для пропуска):")
+    await message.answer(f"💰 Сумма: {final_amount:+,.2f} ₽\n\n📝 Введите комментарий к операции (или 'нет' для пропуска):")
     await state.set_state(BalanceTopupState.waiting_for_comment)
 
 @dp.message(StateFilter(BalanceTopupState.waiting_for_comment))
@@ -1166,28 +1176,41 @@ async def balance_execute(message: types.Message, state: FSMContext):
     data = await state.get_data()
     comment = None if message.text.lower() == "нет" else message.text
     
-    msg = await message.answer(f"🔄 Выполняется операция для гостя #{data['guest_id']} на сумму {data['amount']} ₽...")
+    msg = await message.answer(f"🔄 Выполняется операция для гостя {data['guest_name']} на сумму {data['amount']} ₽...")
     
-    response = await api.update_guest_balance(
-        guest_id=data['guest_id'],
+    response = await api.update_guest_balance_by_phone(
+        phone=data['phone'],
         amount=data['amount'],
-        operation_type="balance",
-        comment=comment,
-        balance_type="BALANCE_EDIT_CP_TOPUP"
+        comment=comment
     )
     
     await msg.delete()
     
     if response.get("status"):
         operation_text = "ПОПОЛНЕНИЕ" if data['amount'] > 0 else "СПИСАНИЕ"
-        await message.answer(f"✅ ОПЕРАЦИЯ УСПЕШНО ВЫПОЛНЕНА!\n\n{operation_text}\n👤 Гость #{data['guest_id']}\n💰 Сумма: {data['amount']:+,.2f} ₽\n📝 Комментарий: {comment or 'Нет'}", reply_markup=get_main_keyboard())
+        await message.answer(
+            f"✅ ОПЕРАЦИЯ УСПЕШНО ВЫПОЛНЕНА!\n\n"
+            f"{operation_text}\n"
+            f"👤 Гость: {data['guest_name']} (ID: {data['guest_id']})\n"
+            f"📱 Телефон: {data['phone']}\n"
+            f"💰 Сумма: {data['amount']:+,.2f} ₽\n"
+            f"📝 Комментарий: {comment or 'Нет'}",
+            reply_markup=get_main_keyboard()
+        )
     else:
-        await message.answer(f"❌ Ошибка: {response.get('error', 'Неизвестная ошибка')}", reply_markup=get_main_keyboard())
+        error_msg = response.get('error', 'Неизвестная ошибка')
+        await message.answer(
+            f"❌ Ошибка: {error_msg}\n\n"
+            f"💡 Возможные причины:\n"
+            f"• У API ключа нет прав на эту операцию\n"
+            f"• Неправильный формат запроса\n"
+            f"• Гость заблокирован",
+            reply_markup=get_main_keyboard()
+        )
     
     await state.clear()
 
 # ========== УПРАВЛЕНИЕ КОМПЬЮТЕРАМИ ==========
-# Словарь команд для ПК
 PC_COMMANDS = {
     "🖥️ Технический старт": "tech_start",
     "🛑 Тех. остановка": "tech_stop",
@@ -1208,7 +1231,6 @@ async def pc_manage_prompt(message: types.Message):
         return
     
     command = PC_COMMANDS[message.text]
-    title = message.text
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🖥️ Все свободные ПК", callback_data=f"pc_{command}_free")],
@@ -1216,7 +1238,7 @@ async def pc_manage_prompt(message: types.Message):
         [InlineKeyboardButton(text="📋 Выбрать по UUID", callback_data=f"pc_{command}_uuids")],
         [InlineKeyboardButton(text="◀️ Отмена", callback_data="pc_cancel")]
     ])
-    await message.answer(f"🖥️ {title}\n\nВыберите режим выполнения:", reply_markup=keyboard)
+    await message.answer(f"🖥️ {message.text}\n\nВыберите режим выполнения:", reply_markup=keyboard)
 
 @dp.callback_query(lambda c: c.data.startswith("pc_"))
 async def pc_manage_callback(callback: types.CallbackQuery, state: FSMContext):
@@ -1260,7 +1282,6 @@ async def pc_manage_uuids(message: types.Message, state: FSMContext):
     data = await state.get_data()
     command = data.get("pc_command")
     
-    # Разбираем UUID (можно через запятую, пробел, или новую строку)
     uuids = [uuid.strip() for uuid in message.text.replace(",", " ").split() if uuid.strip()]
     
     if not uuids:
