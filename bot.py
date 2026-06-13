@@ -88,7 +88,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== МОДЕРНИЗИРОВАННЫЙ РАСЧЕТ С ЛОГИРОВАНИЕМ ==========
+# ========== РАСЧЕТ С ФИЛЬТРАЦИЕЙ MLM И ВОЗВРАТОВ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime):
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
@@ -101,7 +101,6 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime):
     unique_guests = set()
     club_name = "CyberX Клуб"
     
-    # Сюда пишем лог для выгрузки в ТГ
     debug_log = ["=== ЛОГ ФИНАНСОВЫХ ОПЕРАЦИЙ ==="]
     
     for item in operations_data:
@@ -120,16 +119,18 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime):
         if op_name and len(op_name) > 3 and "баланса" in op_name:
             unique_guests.add(op_name[:30])
 
-        # Отсекаем мусор
+        # ЖЕСТКИЙ ФИЛЬТР ИСКЛЮЧЕНИЙ (ТЕХНИЧЕСКИЙ МУСОР, MLM И ВОЗВРАТЫ)
         if (
             "минус" in op_type or "minus" in op_type or "списание" in op_type or
             "статистика" in op_name or "корректировка" in op_name or 
-            "инкассация" in op_name or "ошибка" in op_name or "тест" in op_name
+            "инкассация" in op_name or "ошибка" in op_name or "тест" in op_name or
+            "mlm" in op_source or                       # Исключаем рефералку MLM
+            "возврат" in op_name                        # Исключаем возвраты ДС с сессий
         ):
-            debug_log.append(f"ИГНОР (Мусор): Сумма={op_sum} | Тип='{op_type_raw}' | Имя='{item.get('name')}' | Source='{item.get('source')}'")
+            debug_log.append(f"ИГНОР (Исключено): Сумма={op_sum} | Тип='{op_type_raw}' | Имя='{item.get('name')}' | Source='{item.get('source')}'")
             continue
 
-        # Считаем за выручку
+        # Учитываем только реальный приход денег
         total_income += op_sum
         debug_log.append(f"УЧТЕНО В ВЫРУЧКУ: Сумма={op_sum} | Тип='{op_type_raw}' | Имя='{item.get('name')}' | Source='{item.get('source')}'")
 
@@ -192,11 +193,11 @@ def format_simple_stats(stats: Dict, title: str) -> str:
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот обновлен. Включен режим детального лога операций.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот успешно обновлен. Фильтры MLM и возвратов сессий добавлены.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v21.0*\n\nЛогирование структуры транзакций.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v22.0*\n\nИсправлен учет MLM и возвратов баланса.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
@@ -231,7 +232,7 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         date_from = date_from.replace(hour=0, minute=0)
         date_to = date_to.replace(hour=23, minute=59)
         
-        msg = await message.answer("📊 Расчет и генерация лога...")
+        msg = await message.answer("📊 Сверка финансовых потоков...")
         stats, txt_log = await get_stats_for_period(date_from, date_to)
         stats["period_from"], stats["period_to"] = date_from, date_to
         
@@ -240,10 +241,10 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         # Отправляем текстовый отчет
         await message.answer(format_simple_stats(stats, "ОТЧЕТ ЗА ПЕРИОД"), parse_mode="Markdown")
         
-        # Отправляем файл лога транзакций для сверки с Excel
+        # Режим лога оставляем, чтобы вы могли лично увидеть отфильтрованные строки
         file_data = io.BytesIO(txt_log.encode('utf-8'))
         input_file = BufferedInputFile(file_data.read(), filename=f"log_{date_from.strftime('%Y-%m-%d')}.txt")
-        await message.answer_document(input_file, caption="📄 Сводный лог учтенных операций для сверки")
+        await message.answer_document(input_file, caption="📄 Детальный лог фильтрации для сверки с Excel")
         
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
