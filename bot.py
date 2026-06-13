@@ -116,17 +116,21 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         if op_name and len(op_name) > 3 and "баланса" in op_name:
             unique_guests.add(op_name[:30])
 
-        # СТРОГИЙ ФИЛЬТР ИСКЛЮЧЕНИЙ:
-        # Убираем только системные внутренние возвраты сессий, инкассации и рефералку.
-        if (
-            "минус" in op_type or "minus" in op_type or "списание" in op_type or
-            "автоматическая инкассация" in op_name or "тест" in op_name or
-            "mlm" in op_source or 
-            "возврат дс с сессии" in op_name
-        ):
+        # ЖЕЛЕЗОБЕТОННЫЙ ФИЛЬТР ИСКЛЮЧЕНИЙ:
+        # 1. Убираем все минусы и списания
+        if "минус" in op_type or "minus" in op_type or "списание" in op_type:
+            continue
+        # 2. Убираем технические операции и инкассации
+        if "автоматическая инкассация" in op_name or "тест" in op_name:
+            continue
+        # 3. Убираем реферальные начисления MLM
+        if "mlm" in op_source:
+            continue
+        # 4. Убираем возвраты денежных средств (если в строке есть одновременно "возврат" и "сесс")
+        if "возврат" in op_name and "сесс" in op_name:
             continue
 
-        # Все остальные входящие платежи (включая пополнения через админку и ЛК) суммируем в доход
+        # Все остальные входящие платежи (пополнения через админку и ЛК) суммируем в доход
         if op_type == "plus":
             total_income += op_sum
 
@@ -215,11 +219,11 @@ def format_full_report(stats: Dict) -> str:
 # ========== ТЕЛЕГРАМ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nАлгоритм калиброван по транзакционному логу. Готов к работе.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nИсправлен баг регистра букв. Алгоритм полностью готов.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v30.0*\n\nТочный расчет выручки без ложных исключений.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v31.0*\n\nФинальная версия с исправленным поиском возвратов.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
