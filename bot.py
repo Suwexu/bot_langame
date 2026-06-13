@@ -5,8 +5,8 @@ from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 
-# Вставьте сюда свои данные
-TOKEN = "ВАШ_ТОКЕН_БОТА"
+# Вставьте сюда ВАШ токен прямо в кавычках, чтобы исключить ошибки с .env
+TOKEN = "8899799920:AAGH7EXAMPLE_TOKEN_FROM_BOTFATHER" 
 API_KEY = "ВАШ_LANGAME_API_KEY"
 URL = "https://cyberx302.langame.ru/public_api/all_operations_log/list"
 
@@ -24,25 +24,28 @@ async def get_total():
             data = await resp.json()
             
             total = 0
+            print(f"--- ДИАГНОСТИКА: Данные от Langame ---")
             for op in data.get("data", []):
                 val = float(op.get("sum", 0))
-                # Считаем всё, что является приходом (plus) и положительное число
+                # БЕЗ ФИЛЬТРОВ: добавляем всё, что имеет тип 'plus' и сумму > 0
                 if op.get("type") == "plus" and val > 0:
                     total += val
+                    print(f"✅ УЧТЕНО: {op.get('name')} | {val} ₽")
+                else:
+                    print(f"➖ ПРОПУЩЕНО: {op.get('name')} | тип: {op.get('type')}")
+            
+            print(f"ИТОГО: {total}")
             return total
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("Бот запущен! Нажми кнопку ниже для отчета.", 
-                         reply_markup=types.ReplyKeyboardMarkup(
-                             keyboard=[[types.KeyboardButton(text="Отчет")]],
-                             resize_keyboard=True))
+    await message.answer("Бот готов. Нажми 'Отчет'", reply_markup=types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text="Отчет")]], resize_keyboard=True))
 
 @dp.message(F.text == "Отчет")
 async def report(message: types.Message):
-    await message.answer("Считаю...")
     res = await get_total()
-    await message.answer(f"Итоговая сумма: {res:,.0f} ₽")
+    await message.answer(f"Сумма: {res:,.0f} ₽")
 
 async def main():
     await dp.start_polling(bot)
