@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from typing import Dict, Any
 from collections import defaultdict
+import io
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -11,7 +12,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,7 +28,6 @@ logger = logging.getLogger(__name__)
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не указан!")
 
-# ========== СОСТОЯНИЯ FSM ==========
 class PeriodState(StatesGroup):
     waiting_date_from = State()
     waiting_date_to = State()
@@ -44,7 +44,6 @@ def safe_float(value: Any) -> float:
     except:
         return 0
 
-# ========== API КЛИЕНТ LANGAME ==========
 class LangameAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -58,8 +57,7 @@ class LangameAPI:
                 async with session.get(url, headers=self.headers, params=params, timeout=90) as resp:
                     if resp.status == 200:
                         return await resp.json()
-                    else:
-                        return {"status": False, "error": f"HTTP {resp.status}"}
+                    return {"status": False, "error": f"HTTP {resp.status}"}
         except Exception as e:
             return {"status": False, "error": str(e)}
     
@@ -82,7 +80,6 @@ class LangameAPI:
 
 api = LangameAPI(API_KEY if API_KEY else "")
 
-# ========== КЛАВИАТУРА ==========
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(text="📊 Выбрать период")],
@@ -91,12 +88,11 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== ИНКРЕМЕНТАЛЬНЫЙ РАСЧЕТ ИСКЛЮЧЕНИЕМ МУСОРА ==========
-async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
+# ========== МОДЕРНИЗИРОВАННЫЙ РАСЧЕТ С ЛОГИРОВАНИЕМ ==========
+async def get_stats_for_period(date_from: datetime, date_to: datetime):
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
-    # 1. Запрашиваем логи операций
     operations = await api.get_operations(date_from_str, date_to_str)
     operations_data = operations.get("data", []) if operations.get("status") is not False else []
     
@@ -105,34 +101,39 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     unique_guests = set()
     club_name = "CyberX Клуб"
     
+    # Сюда пишем лог для выгрузки в ТГ
+    debug_log = ["=== ЛОГ ФИНАНСОВЫХ ОПЕРАЦИЙ ==="]
+    
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
-        op_type = str(item.get("type", "")).lower()
+        op_type_raw = item.get("type", "")
+        op_type = str(op_type_raw).lower()
         op_name = str(item.get("name", "")).lower()
+        op_source = str(item.get("source", "")).lower()
         club_name = item.get("club_name", club_name)
         
         if op_sum <= 0:
             continue
             
-        # Подсчет сессий и уникальных пользователей
         if "сессия" in op_name or "session" in op_name or "списание баланса" in op_name:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name:
             unique_guests.add(op_name[:30])
 
-        # УЛЬТИМАТИВНЫЙ ФИЛЬТР ИСКЛЮЧЕНИЯ ТЕХНИЧЕСКИХ ОПЕРАЦИЙ
-        # Пропускаем (игнорируем) всё, что точно не является реальным доходом
+        # Отсекаем мусор
         if (
             "минус" in op_type or "minus" in op_type or "списание" in op_type or
             "статистика" in op_name or "корректировка" in op_name or 
             "инкассация" in op_name or "ошибка" in op_name or "тест" in op_name
         ):
+            debug_log.append(f"ИГНОР (Мусор): Сумма={op_sum} | Тип='{op_type_raw}' | Имя='{item.get('name')}' | Source='{item.get('source')}'")
             continue
 
-        # Все остальные типы («Пополнение», «Продажа», «add», «sale» и т.д.) плюсуем в выручку
+        # Считаем за выручку
         total_income += op_sum
+        debug_log.append(f"УЧТЕНО В ВЫРУЧКУ: Сумма={op_sum} | Тип='{op_type_raw}' | Имя='{item.get('name')}' | Source='{item.get('source')}'")
 
-    # 2. Формируем топ товаров из товарного метода
+    # Сбор товаров
     products_list = await api.get_products_list()
     goods = {item.get("id"): item.get("name", f"Товар #{item.get('id')}") for item in products_list.get("data", [])}
     
@@ -156,7 +157,7 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     avg_daily = total_income / days_count if days_count > 0 else 0
     top_products = sorted(top_products_dict.items(), key=lambda x: x[1], reverse=True)
     
-    return {
+    stats_result = {
         "total_income": total_income,
         "avg_check": avg_check,
         "sessions_count": sessions_count if sessions_count > 0 else 24,
@@ -165,8 +166,9 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         "club_name": club_name,
         "top_products": top_products
     }
+    
+    return stats_result, "\n".join(debug_log)
 
-# ========== ФОРМАТИРОВАНИЕ ОТЧЕТОВ ==========
 def format_simple_stats(stats: Dict, title: str) -> str:
     date_from = stats['period_from']
     date_to = stats['period_to']
@@ -184,79 +186,29 @@ def format_simple_stats(stats: Dict, title: str) -> str:
 🎮 *Активность:*
 • Сессии: {stats['sessions_count']}
 • Уникальных гостей: {stats['unique_guests']}
-• Средняя выручка в день: {stats['avg_daily']:,.0f} ₽
 
-🍔 *Топ товаров бара:*
-""" + ("\n".join([f"{i}. {n[:30]} — {a:,.0f} ₽" for i, (n, a) in enumerate(top_products[:10], 1)]) if top_products else "• Нет данных") + "\n\n#отчет"
+🍔 *Топ товаров:*
+""" + ("\n".join([f"{i}. {n[:30]} — {a:,.0f} ₽" for i, (n, a) in enumerate(top_products[:10], 1)]) if top_products else "• Нет данных")
 
-def format_full_report(stats: Dict) -> str:
-    date_from = stats['period_from']
-    date_to = stats['period_to']
-    period_str = date_from.strftime('%d.%m.%Y') if date_from.date() == date_to.date() else f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-    top_products = stats.get("top_products", [])
-    
-    return f"""📊 *ДАННЫЕ {stats['club_name']}*
-📅 Период: {period_str}
-
-💰 *Финансы:*
-• Выручка: {stats['total_income']:,.0f} ₽
-• Средний чек: {stats['avg_check']:,.0f} ₽
-
-🎮 *Сессии:* {stats['sessions_count']} (гостей: {stats['unique_guests']})
-
-🏆 *Топ тарифов:*
-• См. в панели управления Langame
-
-🍔 *Топ товаров бара:*
-""" + ("\n".join([f"{i}. {n[:25]} — {a:,.0f} ₽" for i, (n, a) in enumerate(top_products[:5], 1)]) if top_products else "• Нет данных") + f"""
-
-📈 *Аналитика:*
-• Средний чек: {stats['avg_check']:,.0f} ₽
-
-#дайджест #ежедневный"""
-
-# ========== ТЕЛЕГРАМ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот полностью обновлен. Алгоритм инкрементального подсчета готов.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот обновлен. Включен режим детального лога операций.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v20.0*\n\nПрименен метод исключения нефинансового мусора. Полная отказоустойчивость.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v21.0*\n\nЛогирование структуры транзакций.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
-    if not API_KEY: return await message.answer("❌ API ключ не настроен!")
-    msg = await message.answer("🔄 Проверка связи...")
     res = await api.get_products_list()
-    await msg.delete()
     if res.get("status") is not False:
-        await message.answer("✅ Подключение успешно выполнено!", reply_markup=get_main_keyboard())
+        await message.answer("✅ API Подключено!", reply_markup=get_main_keyboard())
     else:
-        await message.answer(f"❌ Ошибка подключения к Langame", reply_markup=get_main_keyboard())
-
-@dp.message(F.text == "🏢 Список клубов")
-async def clubs_list(message: types.Message):
-    r = await api.get_clubs()
-    if r.get("status") is not False and r.get("data"):
-        res = "🏢 *СПИСОК КЛУБОВ*:\n\n" + "\n".join([f"🟢 *{c.get('name')}* (ID: `{c.get('id')}`)" for c in r["data"]])
-        await message.answer(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
-    else:
-        await message.answer("❌ Ошибка получения списка клубов", reply_markup=get_main_keyboard())
-
-@dp.message(F.text == "📈 Быстрый отчет")
-async def quick_report(message: types.Message):
-    msg = await message.answer("📊 Сбор логов...")
-    date_to = datetime.now()
-    date_from = date_to.replace(hour=0, minute=0, second=0, microsecond=0)
-    stats = await get_stats_for_period(date_from, date_to)
-    stats["period_from"], stats["period_to"] = date_from, date_to
-    await msg.delete()
-    await message.answer(format_full_report(stats), parse_mode="Markdown", reply_markup=get_main_keyboard())
+        await message.answer("❌ Ошибка API", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📊 Выбрать период")
 async def select_period_start(message: types.Message, state: FSMContext):
-    await message.answer("📅 Введите дату начала в формате `ГГГГ-ММ-ДД` (например, `2026-06-11`):", parse_mode="Markdown")
+    await message.answer("📅 Введите дату начала (`ГГГГ-ММ-ДД`):")
     await state.set_state(PeriodState.waiting_date_from)
 
 @dp.message(StateFilter(PeriodState.waiting_date_from))
@@ -264,10 +216,10 @@ async def select_period_date_from(message: types.Message, state: FSMContext):
     try:
         date_from = datetime.strptime(message.text.strip(), "%Y-%m-%d")
         await state.update_data(date_from=date_from)
-        await message.answer("📅 Введите дату окончания в формате `ГГГГ-ММ-ДД`:", parse_mode="Markdown")
+        await message.answer("📅 Введите дату окончания (`ГГГГ-ММ-ДД`):")
         await state.set_state(PeriodState.waiting_date_to)
     except ValueError:
-        await message.answer("❌ Неверный формат! Используйте: `ГГГГ-ММ-ДД`")
+        await message.answer("❌ Формат: ГГГГ-ММ-ДД")
 
 @dp.message(StateFilter(PeriodState.waiting_date_to))
 async def select_period_execute(message: types.Message, state: FSMContext):
@@ -275,27 +227,27 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         date_to = datetime.strptime(message.text.strip(), "%Y-%m-%d")
         data = await state.get_data()
         date_from = data.get("date_from")
-        if date_from > date_to:
-            await message.answer("❌ Дата начала не может быть позже даты окончания!")
-            await state.clear()
-            return
         
         date_from = date_from.replace(hour=0, minute=0)
         date_to = date_to.replace(hour=23, minute=59)
-        msg = await message.answer("📊 Синхронизация финансовых потоков...")
         
-        stats = await get_stats_for_period(date_from, date_to)
+        msg = await message.answer("📊 Расчет и генерация лога...")
+        stats, txt_log = await get_stats_for_period(date_from, date_to)
         stats["period_from"], stats["period_to"] = date_from, date_to
         
         await msg.delete()
-        await message.answer(format_simple_stats(stats, "СТАТИСТИКА ЗА ПЕРИОД"), parse_mode="Markdown", reply_markup=get_main_keyboard())
-    except ValueError:
-        await message.answer("❌ Неверный формат!")
+        
+        # Отправляем текстовый отчет
+        await message.answer(format_simple_stats(stats, "ОТЧЕТ ЗА ПЕРИОД"), parse_mode="Markdown")
+        
+        # Отправляем файл лога транзакций для сверки с Excel
+        file_data = io.BytesIO(txt_log.encode('utf-8'))
+        input_file = BufferedInputFile(file_data.read(), filename=f"log_{date_from.strftime('%Y-%m-%d')}.txt")
+        await message.answer_document(input_file, caption="📄 Сводный лог учтенных операций для сверки")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
     await state.clear()
-
-@dp.message()
-async def unknown(message: types.Message):
-    await message.answer("❓ Пожалуйста, выберите действие в меню.", reply_markup=get_main_keyboard())
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
