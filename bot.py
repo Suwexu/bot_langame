@@ -91,12 +91,12 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== СВЕДЕННЫЙ АНАЛИТИЧЕСКИЙ РАСЧЕТ ==========
+# ========== ИНКРЕМЕНТАЛЬНЫЙ РАСЧЕТ ИСКЛЮЧЕНИЕМ МУСОРА ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
-    # 1. Загружаем операции из лога
+    # 1. Запрашиваем логи операций
     operations = await api.get_operations(date_from_str, date_to_str)
     operations_data = operations.get("data", []) if operations.get("status") is not False else []
     
@@ -107,38 +107,32 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
-        op_type_raw = item.get("type", "")
-        op_type = op_type_raw.lower() if op_type_raw else ""
-        op_name = item.get("name", "")
-        op_name_lower = op_name.lower() if op_name else ""
+        op_type = str(item.get("type", "")).lower()
+        op_name = str(item.get("name", "")).lower()
         club_name = item.get("club_name", club_name)
         
         if op_sum <= 0:
             continue
             
-        # Сбор нефинансовой статистики активности
-        if "сессия" in op_name_lower or "session" in op_name_lower or "списание баланса" in op_name_lower:
+        # Подсчет сессий и уникальных пользователей
+        if "сессия" in op_name or "session" in op_name or "списание баланса" in op_name:
             sessions_count += 1
-        if op_name and len(op_name) > 3 and "баланса" in op_name_lower:
+        if op_name and len(op_name) > 3 and "баланса" in op_name:
             unique_guests.add(op_name[:30])
 
-        # Фильтрация технического мусора (инкассации, корректировки администраторов)
+        # УЛЬТИМАТИВНЫЙ ФИЛЬТР ИСКЛЮЧЕНИЯ ТЕХНИЧЕСКИХ ОПЕРАЦИЙ
+        # Пропускаем (игнорируем) всё, что точно не является реальным доходом
         if (
-            "статистика" in op_name_lower or 
-            "корректировка" in op_name_lower or 
-            "инкассация" in op_name_lower or
-            "ошибка" in op_name_lower
+            "минус" in op_type or "minus" in op_type or "списание" in op_type or
+            "статистика" in op_name or "корректировка" in op_name or 
+            "инкассация" in op_name or "ошибка" in op_name or "тест" in op_name
         ):
             continue
 
-        # Проверка типа операции в любом регистре (RU/EN интерфейсы API)
-        is_add = "пополнение" in op_type or "add" in op_type or "плюс" in op_type
-        is_sale = "продажа" in op_type or "sale" in op_type
-        
-        if is_add or is_sale:
-            total_income += op_sum
+        # Все остальные типы («Пополнение», «Продажа», «add», «sale» и т.д.) плюсуем в выручку
+        total_income += op_sum
 
-    # 2. Формируем Топ товаров отдельно из товарной сетки
+    # 2. Формируем топ товаров из товарного метода
     products_list = await api.get_products_list()
     goods = {item.get("id"): item.get("name", f"Товар #{item.get('id')}") for item in products_list.get("data", [])}
     
@@ -224,11 +218,11 @@ def format_full_report(stats: Dict) -> str:
 # ========== ТЕЛЕГРАМ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот полностью синхронизирован по регистрам API. Готов к проверке.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот полностью обновлен. Алгоритм инкрементального подсчета готов.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v19.0*\n\nДобавлен мультиязычный регистронезависимый парсинг ответов API.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v20.0*\n\nПрименен метод исключения нефинансового мусора. Полная отказоустойчивость.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
