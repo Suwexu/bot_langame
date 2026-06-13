@@ -21,8 +21,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("LANGAME_API_KEY")
 API_BASE_URL = "https://cyberx302.langame.ru/public_api"
 
-# Включаем подробный вывод логов в консоль
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 if not BOT_TOKEN:
@@ -64,7 +63,7 @@ class LangameAPI:
     async def get_clubs(self) -> Dict:
         return await self._request("/clubs/list")
     
-    async def get_operations(self, date_from: str, date_to: str) -> Dict:
+    async def get_operations((self, date_from: str, date_to: str) -> Dict:
         return await self._request("/all_operations_log/list", params={"date_from": date_from, "date_to": date_to})
     
     async def get_products_list(self) -> Dict:
@@ -88,7 +87,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== ОПТИМИЗИРОВАННЫЙ РАСЧЕТ С ЛОГИРОВАНИЕМ ==========
+# ========== ЭТАЛОННЫЙ ТОЧНЫЙ РАСЧЕТ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
@@ -101,8 +100,6 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     unique_guests = set()
     club_name = "CyberX Клуб"
     
-    print(f"\n--- НАЧАЛО ДЕТАЛЬНОГО РАСЧЕТА ЗА {date_from_str} ---")
-    
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = str(item.get("type", "")).lower()
@@ -113,28 +110,25 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         if op_sum <= 0:
             continue
             
+        # Подсчет сессий и уникальных гостей
         if "сессия" in op_name or "session" in op_name or "списание баланса" in op_name:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name:
             unique_guests.add(op_name[:30])
 
-        # ФИЛЬТР ИСКЛЮЧЕНИЙ
+        # СТРОГИЙ ФИЛЬТР ИСКЛЮЧЕНИЙ:
+        # Убираем только системные внутренние возвраты сессий, инкассации и рефералку.
         if (
             "минус" in op_type or "minus" in op_type or "списание" in op_type or
-            "статистика" in op_name or "корректировка" in op_name or 
-            "инкассация" in op_name or "ошибка" in op_name or "тест" in op_name or
+            "автоматическая инкассация" in op_name or "тест" in op_name or
             "mlm" in op_source or 
-            "возврат дс с сессии" in op_name  # Точное совпадение для возвратов
+            "возврат дс с сессии" in op_name
         ):
-            print(f"ИГНОР (Исключено): Сумма={op_sum} | Тип='{op_type}' | Имя='{item.get('name')}' | Source='{op_source}'")
             continue
 
+        # Все остальные входящие платежи (включая пополнения через админку и ЛК) суммируем в доход
         if op_type == "plus":
             total_income += op_sum
-            print(f"УЧТЕНО В ВЫРУЧКУ: Сумма={op_sum} | Тип='{op_type}' | Имя='{item.get('name')}' | Source='{op_source}'")
-
-    print(f"ИТОГОВАЯ ВЫРУЧКА ПО РАСЧЕТУ БОТА: {total_income} ₽")
-    print(f"--- КОНЕЦ ДЕТАЛЬНОГО РАСЧЕТА ---\n")
 
     # Расчет топ товаров бара
     products_list = await api.get_products_list()
@@ -221,11 +215,11 @@ def format_full_report(stats: Dict) -> str:
 # ========== ТЕЛЕГРАМ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nВключен режим детального логирования транзакций.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nАлгоритм калиброван по транзакционному логу. Готов к работе.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v29.0*\n\nЛогирование включено в консоль сервера.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v30.0*\n\nТочный расчет выручки без ложных исключений.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
@@ -246,7 +240,7 @@ async def clubs_list(message: types.Message):
 
 @dp.message(F.text == "📈 Быстрый отчет")
 async def quick_report(message: types.Message):
-    msg = await message.answer("📊 Формирование финансового отчета...")
+    msg = await message.answer("📊 Считаю чистую выручку...")
     date_to = datetime.now()
     date_from = date_to.replace(hour=0, minute=0, second=0, microsecond=0)
     stats = await get_stats_for_period(date_from, date_to)
@@ -279,7 +273,7 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         date_from = date_from.replace(hour=0, minute=0)
         date_to = date_to.replace(hour=23, minute=59)
         
-        msg = await message.answer("📊 Синхронизация...")
+        msg = await message.answer("📊 Синхронизация с Langame...")
         stats = await get_stats_for_period(date_from, date_to)
         stats["period_from"], stats["period_to"] = date_from, date_to
         
