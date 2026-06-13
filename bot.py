@@ -4,7 +4,6 @@ import logging
 from datetime import datetime
 from typing import Dict, Any
 from collections import defaultdict
-import io
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
@@ -12,7 +11,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -88,8 +87,8 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== РАСЧЕТ С ФИЛЬТРАЦИЕЙ MLM И ВОЗВРАТОВ ==========
-async def get_stats_for_period(date_from: datetime, date_to: datetime):
+# ==========ОПТИМИЗИРОВАННЫЙ СБАЛАНСИРОВАННЫЙ РАСЧЕТ ==========
+async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
     
@@ -101,12 +100,9 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime):
     unique_guests = set()
     club_name = "CyberX Клуб"
     
-    debug_log = ["=== ЛОГ ФИНАНСОВЫХ ОПЕРАЦИЙ ==="]
-    
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
-        op_type_raw = item.get("type", "")
-        op_type = str(op_type_raw).lower()
+        op_type = str(item.get("type", "")).lower()
         op_name = str(item.get("name", "")).lower()
         op_source = str(item.get("source", "")).lower()
         club_name = item.get("club_name", club_name)
@@ -114,27 +110,25 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime):
         if op_sum <= 0:
             continue
             
+        # Статистика активности
         if "сессия" in op_name or "session" in op_name or "списание баланса" in op_name:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name:
             unique_guests.add(op_name[:30])
 
-        # ЖЕСТКИЙ ФИЛЬТР ИСКЛЮЧЕНИЙ (ТЕХНИЧЕСКИЙ МУСОР, MLM И ВОЗВРАТЫ)
+        # ИСКЛЮЧАЕМ ТОЛЬКО ЯВНЫЙ НЕФИНАНСОВЫЙ МУСОР И РЕФЕРАЛКУ
         if (
             "минус" in op_type or "minus" in op_type or "списание" in op_type or
             "статистика" in op_name or "корректировка" in op_name or 
             "инкассация" in op_name or "ошибка" in op_name or "тест" in op_name or
-            "mlm" in op_source or                       # Исключаем рефералку MLM
-            "возврат" in op_name                        # Исключаем возвраты ДС с сессий
+            "mlm" in op_source
         ):
-            debug_log.append(f"ИГНОР (Исключено): Сумма={op_sum} | Тип='{op_type_raw}' | Имя='{item.get('name')}' | Source='{item.get('source')}'")
             continue
 
-        # Учитываем только реальный приход денег
+        # Все остальные входящие 'plus' транзакции (включая возвраты на баланс) добавляем в доход!
         total_income += op_sum
-        debug_log.append(f"УЧТЕНО В ВЫРУЧКУ: Сумма={op_sum} | Тип='{op_type_raw}' | Имя='{item.get('name')}' | Source='{item.get('source')}'")
 
-    # Сбор товаров
+    # Расчет товаров бара
     products_list = await api.get_products_list()
     goods = {item.get("id"): item.get("name", f"Товар #{item.get('id')}") for item in products_list.get("data", [])}
     
@@ -158,7 +152,7 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime):
     avg_daily = total_income / days_count if days_count > 0 else 0
     top_products = sorted(top_products_dict.items(), key=lambda x: x[1], reverse=True)
     
-    stats_result = {
+    return {
         "total_income": total_income,
         "avg_check": avg_check,
         "sessions_count": sessions_count if sessions_count > 0 else 24,
@@ -167,9 +161,8 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime):
         "club_name": club_name,
         "top_products": top_products
     }
-    
-    return stats_result, "\n".join(debug_log)
 
+# ========== ШАБЛОНЫ ОТЧЕТОВ ==========
 def format_simple_stats(stats: Dict, title: str) -> str:
     date_from = stats['period_from']
     date_to = stats['period_to']
@@ -188,16 +181,43 @@ def format_simple_stats(stats: Dict, title: str) -> str:
 • Сессии: {stats['sessions_count']}
 • Уникальных гостей: {stats['unique_guests']}
 
-🍔 *Топ товаров:*
-""" + ("\n".join([f"{i}. {n[:30]} — {a:,.0f} ₽" for i, (n, a) in enumerate(top_products[:10], 1)]) if top_products else "• Нет данных")
+🍔 *Топ товаров бара:*
+""" + ("\n".join([f"{i}. {n[:30]} — {a:,.0f} ₽" for i, (n, a) in enumerate(top_products[:10], 1)]) if top_products else "• Нет данных") + "\n\n#отчет"
 
+def format_full_report(stats: Dict) -> str:
+    date_from = stats['period_from']
+    date_to = stats['period_to']
+    period_str = date_from.strftime('%d.%m.%Y') if date_from.date() == date_to.date() else f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+    top_products = stats.get("top_products", [])
+    
+    return f"""📊 *ДАННЫЕ {stats['club_name']}*
+📅 Период: {period_str}
+
+💰 *Финансы:*
+• Выручка: {stats['total_income']:,.0f} ₽
+• Средний чек: {stats['avg_check']:,.0f} ₽
+
+🎮 *Сессии:* {stats['sessions_count']} (гостей: {stats['unique_guests']})
+
+🏆 *Топ тарифов:*
+• См. в панели управления Langame
+
+🍔 *Топ товаров бара:*
+""" + ("\n".join([f"{i}. {n[:25]} — {a:,.0f} ₽" for i, (n, a) in enumerate(top_products[:5], 1)]) if top_products else "• Нет данных") + f"""
+
+📈 *Аналитика:*
+• Средний чек: {stats['avg_check']:,.0f} ₽
+
+#дайджест #ежедневный"""
+
+# ========== ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот успешно обновлен. Фильтры MLM и возвратов сессий добавлены.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nАлгоритм калиброван. Баланс возвратов восстановлен.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v22.0*\n\nИсправлен учет MLM и возвратов баланса.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v25.0*\n\nИсправлен учет внутренних возвратов сессий на баланс аккаунтов.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
@@ -206,6 +226,25 @@ async def test_api(message: types.Message):
         await message.answer("✅ API Подключено!", reply_markup=get_main_keyboard())
     else:
         await message.answer("❌ Ошибка API", reply_markup=get_main_keyboard())
+
+@dp.message(F.text == "🏢 Список клубов")
+async def clubs_list(message: types.Message):
+    r = await api.get_clubs()
+    if r.get("status") is not False and r.get("data"):
+        res = "🏢 *СПИСОК КЛУБОВ*:\n\n" + "\n".join([f"🟢 *{c.get('name')}* (ID: `{c.get('id')}`)" for c in r["data"]])
+        await message.answer(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    else:
+        await message.answer("❌ Ошибка получения списка клубов", reply_markup=get_main_keyboard())
+
+@dp.message(F.text == "📈 Быстрый отчет")
+async def quick_report(message: types.Message):
+    msg = await message.answer("📊 Считаю выручку...")
+    date_to = datetime.now()
+    date_from = date_to.replace(hour=0, minute=0, second=0, microsecond=0)
+    stats = await get_stats_for_period(date_from, date_to)
+    stats["period_from"], stats["period_to"] = date_from, date_to
+    await msg.delete()
+    await message.answer(format_full_report(stats), parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "📊 Выбрать период")
 async def select_period_start(message: types.Message, state: FSMContext):
@@ -232,22 +271,15 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         date_from = date_from.replace(hour=0, minute=0)
         date_to = date_to.replace(hour=23, minute=59)
         
-        msg = await message.answer("📊 Сверка финансовых потоков...")
-        stats, txt_log = await get_stats_for_period(date_from, date_to)
+        msg = await message.answer("📊 Загрузка данных...")
+        stats = await get_stats_for_period(date_from, date_to)
         stats["period_from"], stats["period_to"] = date_from, date_to
         
         await msg.delete()
-        
-        # Отправляем текстовый отчет
-        await message.answer(format_simple_stats(stats, "ОТЧЕТ ЗА ПЕРИОД"), parse_mode="Markdown")
-        
-        # Режим лога оставляем, чтобы вы могли лично увидеть отфильтрованные строки
-        file_data = io.BytesIO(txt_log.encode('utf-8'))
-        input_file = BufferedInputFile(file_data.read(), filename=f"log_{date_from.strftime('%Y-%m-%d')}.txt")
-        await message.answer_document(input_file, caption="📄 Детальный лог фильтрации для сверки с Excel")
+        await message.answer(format_simple_stats(stats, "СТАТИСТИКА ЗА ПЕРИОД"), parse_mode="Markdown", reply_markup=get_main_keyboard())
         
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
+        await message.answer(f"❌ Ошибка расчета")
     await state.clear()
 
 async def main():
