@@ -87,7 +87,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== ЭТАЛОННЫЙ РАСЧЕТ С ИСКЛЮЧЕНИЕМ ВОЗВРАТОВ СЕССИЙ ==========
+# ==========ОПТИМИЗИРОВАННЫЙ ТОЧНЫЙ РАСЧЕТ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
@@ -110,26 +110,28 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         if op_sum <= 0:
             continue
             
-        # Сбор нефинансовых данных активности
+        # Сбор нефинансовой статистики активности
         if "сессия" in op_name or "session" in op_name or "списание баланса" in op_name:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name:
             unique_guests.add(op_name[:30])
 
-        # ЖЕСТКИЙ ФИЛЬТР ИСКЛЮЧЕНИЙ ВНУТРЕННИХ ОПЕРАЦИЙ (ВОЗВРАТЫ СЕССИЙ ТЕПЕРЬ ТУТ)
+        # Учитываем только реальные пополнения (Admin и Cabinet) и продажи.
+        # Исключаем минусы, системный мусор и ВОЗВРАТЫ СЕССИЙ.
         if (
             "минус" in op_type or "minus" in op_type or "списание" in op_type or
             "статистика" in op_name or "корректировка" in op_name or 
             "инкассация" in op_name or "ошибка" in op_name or "тест" in op_name or
             "mlm" in op_source or 
-            "возврат" in op_name  # Исключаем возвраты ДС с сессий, они завышали выручку на 667р
+            "возврат дс" in op_name
         ):
             continue
 
-        # Все остальные чистые входящие платежи суммируем
-        total_income += op_sum
+        # Все остальные входящие 'plus' транзакции добавляем в выручку
+        if op_type == "plus":
+            total_income += op_sum
 
-    # Расчет топ товаров
+    # Расчет топ товаров бара
     products_list = await api.get_products_list()
     goods = {item.get("id"): item.get("name", f"Товар #{item.get('id')}") for item in products_list.get("data", [])}
     
@@ -214,11 +216,11 @@ def format_full_report(stats: Dict) -> str:
 # ========== ТЕЛЕГРАМ ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот откалиброван до рубля и готов к работе.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nБот обновлен. Личный кабинет учитывается, возвраты сессий исключены.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v26.0*\n\nФинальная версия алгоритма расчета чистой выручки.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v28.0*\n\nИсправлен учет пополнений через ЛК.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
@@ -239,7 +241,7 @@ async def clubs_list(message: types.Message):
 
 @dp.message(F.text == "📈 Быстрый отчет")
 async def quick_report(message: types.Message):
-    msg = await message.answer("📊 Загрузка финансового дайджеста...")
+    msg = await message.answer("📊 Формирование финансового отчета...")
     date_to = datetime.now()
     date_from = date_to.replace(hour=0, minute=0, second=0, microsecond=0)
     stats = await get_stats_for_period(date_from, date_to)
@@ -249,7 +251,7 @@ async def quick_report(message: types.Message):
 
 @dp.message(F.text == "📊 Выбрать период")
 async def select_period_start(message: types.Message, state: FSMContext):
-    await message.answer("📅 Введите дату начала в формате `ГГГГ-ММ-ДД` (например, `2026-06-11`):")
+    await message.answer("📅 Введите дату начала в формате `ГГГГ-ММ-ДД`:")
     await state.set_state(PeriodState.waiting_date_from)
 
 @dp.message(StateFilter(PeriodState.waiting_date_from))
@@ -272,7 +274,7 @@ async def select_period_execute(message: types.Message, state: FSMContext):
         date_from = date_from.replace(hour=0, minute=0)
         date_to = date_to.replace(hour=23, minute=59)
         
-        msg = await message.answer("📊 Синхронизация с Langame...")
+        msg = await message.answer("📊 Синхронизация...")
         stats = await get_stats_for_period(date_from, date_to)
         stats["period_from"], stats["period_to"] = date_from, date_to
         
