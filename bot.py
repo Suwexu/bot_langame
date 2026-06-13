@@ -87,7 +87,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== ЭТАЛОННЫЙ ТОЧНЫЙ РАСЧЕТ ==========
+# ========== ЧИСТЫЙ МАТЕМАТИЧЕСКИЙ РАСЧЕТ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
@@ -110,27 +110,25 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         if op_sum <= 0:
             continue
             
-        # Подсчет сессий и уникальных гостей
+        # Подсчет сессий и уникальных посетителей
         if "сессия" in op_name or "session" in op_name or "списание баланса" in op_name:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name:
             unique_guests.add(op_name[:30])
 
-        # ЖЕЛЕЗОБЕТОННЫЙ ФИЛЬТР ИСКЛЮЧЕНИЙ:
-        # 1. Убираем все минусы и списания
+        # ИСКЛЮЧЕНИЕ СИСТЕМНОГО МУСОРА
         if "минус" in op_type or "minus" in op_type or "списание" in op_type:
             continue
-        # 2. Убираем технические операции и инкассации
         if "автоматическая инкассация" in op_name or "тест" in op_name:
             continue
-        # 3. Убираем реферальные начисления MLM
         if "mlm" in op_source:
             continue
-        # 4. Убираем возвраты денежных средств (если в строке есть одновременно "возврат" и "сесс")
+            
+        # Защита от системных возвратов (Регистронезависимая проверка ключевых слов)
         if "возврат" in op_name and "сесс" in op_name:
             continue
 
-        # Все остальные входящие платежи (пополнения через админку и ЛК) суммируем в доход
+        # В выручку идут только чистые пополнения (Касса / Личный кабинет) и продажа товаров
         if op_type == "plus":
             total_income += op_sum
 
@@ -216,14 +214,14 @@ def format_full_report(stats: Dict) -> str:
 
 #дайджест #ежедневный"""
 
-# ========== ТЕЛЕГРАМ ОБРАБОТЧИКИ ==========
+# ========== ОБРАБОТЧИКИ AIOGRAM ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nИсправлен баг регистра букв. Алгоритм полностью готов.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nИсправлен баг кодировки кириллицы. Бот готов к работе.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v31.0*\n\nФинальная версия с исправленным поиском возвратов.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v32.0*\n\nФинальный релиз с раздельным поиском подстрок.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
