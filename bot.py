@@ -87,7 +87,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ========== МАТЕМАТИЧЕСКИ ТОЧНЫЙ РАСЧЕТ ==========
+# ========== ДИАГНОСТИЧЕСКИЙ РАСЧЕТ ==========
 async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     date_from_str = date_from.strftime("%Y-%m-%d")
     date_to_str = date_to.strftime("%Y-%m-%d")
@@ -100,6 +100,8 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
     unique_guests = set()
     club_name = "CyberX Клуб"
     
+    print("\n--- НАЧАЛО ДИАГНОСТИКИ ОПЕРАЦИЙ ---")
+    
     for item in operations_data:
         op_sum = safe_float(item.get("sum", 0))
         op_type = str(item.get("type", "")).lower()
@@ -110,35 +112,37 @@ async def get_stats_for_period(date_from: datetime, date_to: datetime) -> Dict:
         if op_sum <= 0:
             continue
             
-        # Подсчет сессий и уникальных гостей
         if "сессия" in op_name or "session" in op_name or "списание баланса" in op_name:
             sessions_count += 1
         if op_name and len(op_name) > 3 and "баланса" in op_name:
             unique_guests.add(op_name[:30])
 
-        # --- ЖЕСТКИЙ ФИЛЬТР НА ВХОДЯЩУЮ ВЫРУЧКУ ---
-        # 1. Сразу отсекаем любые минусы и списания
+        # --- ЖЕСТКАЯ ВАЛИДАЦИЯ ---
+        is_excluded = False
+        
         if "минус" in op_type or "minus" in op_type or "списание" in op_type:
-            continue
-            
-        # 2. Игнорируем рефералку MLM и технические маркеры
-        if "mlm" in op_source or "тест" in op_name:
-            continue
+            is_excluded = True
+        elif "автоматическая инкассация" in op_name or "тест" in op_name:
+            is_excluded = True
+        elif "mlm" in op_source:
+            is_excluded = True
+        elif "возврат" in op_name or "сесс" in op_name:
+            if not any(x in op_name for x in ["козел", "кола", "добрый", "берн", "флеш", "сникерс", "милка", "хрустальная"]):
+                is_excluded = True
 
-        # 3. Точечное отсечение возвратов: если это ПЛЮС, но в имени есть "возврат" или "сесс" — мимо!
-        if "возврат" in op_name or "сесс" in op_name:
-            # Делаем дополнительную проверку, чтобы обычное "Пополнение баланса" не улетело в трубу
-            if "пополнение" not in op_name and "баланс" not in op_name:
-                # Если это не продажа товара (в баре нет слова "сессия" или "возврат"), то пропускаем её
-                if not any(x in op_name for x in ["козел", "кола", "добрый", "берн", "флеш", "сникерс", "милка", "хрустальная"]):
-                    continue
-
-        # В выручку берем только реальные ПЛЮСЫ от админки, кабинета или продаж товаров
-        if op_type == "plus":
-            # Проверяем, чтобы пополнение не оказалось скрытым возвратом сессии
+        if op_type == "plus" and not is_excluded:
             if "возврат дс" in op_name or ("возврат" in op_name and "баланс" not in op_name):
-                continue
-            total_income += op_sum
+                is_excluded = True
+        
+        if op_type == "plus":
+            if is_excluded:
+                print(f"❌ ИСКЛЮЧЕНО: {item.get('name', 'Без имени')} | {op_sum} ₽ (source={op_source})")
+            else:
+                print(f"✅ ПРИБАВЛЕНО: {item.get('name', 'Без имени')} | {op_sum} ₽")
+                total_income += op_sum
+
+    print(f"*** ИТОГОВАЯ РАССЧИТАННАЯ ВЫРУЧКА: {total_income} ₽ ***")
+    print("--- КОНЕЦ ДИАГНОСТИКИ ---\n")
 
     # Расчет топ товаров бара
     products_list = await api.get_products_list()
@@ -225,11 +229,11 @@ def format_full_report(stats: Dict) -> str:
 # ========== ОБРАБОТЧИКИ AIOGRAM ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nАрхитектура фильтров полностью переписана на строгую валидацию приходов. Готов к тесту.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("📊 *LANGAME АНАЛИТИКА*\n\nЗагружена диагностическая версия v33.1. Бот готов к работе.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about(message: types.Message):
-    await message.answer("🤖 *LANGAME АНАЛИТИКА v33.0*\n\nИсключена зависимость от строковых аномалий API.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer("🤖 *LANGAME АНАЛИТИКА v33.1*\n\nВключена диагностика расхождения на 340 рублей.", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "🔌 Проверить API")
 async def test_api(message: types.Message):
